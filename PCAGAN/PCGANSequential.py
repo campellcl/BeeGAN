@@ -28,14 +28,46 @@ def main(args):
             print('sample data shape: %s' % (X.shape, ))
     # TODO: Do the train-test-val partition here (after obtaining more data):
     train_data = X
+    # Create the model:
     pca_gan_model = make_pca_gan_model(
         receptive_field_size=train_data.shape[1],
-        train_batch_size=10,
+        train_batch_size=train_data.shape[0],
         num_units_h1=2,
         activation_h1=tf.nn.leaky_relu
     )
     if is_debug:
-        print('pca_gan_model summary: %s' % pca_gan_model.summary())
+        pca_gan_model.summary()
+    # Compile the model:
+    pca_gan_model.compile(
+        optimizer='rmsprop',
+        loss=None,
+        metrics='rmse',
+        loss_weights=None,
+        weighted_metrics=None,
+        run_eagerly=None
+    )
+    # Fit the model to the training data:
+    pca_gan_model.fit(
+        x=train_data,
+        y=None,
+        batch_size=train_data.shape[0],
+        epochs=1,
+        verbose=1,
+        callbacks=None,
+        validation_split=0.0,
+        validation_data=None,
+        shuffle=True,
+        class_weight=None,
+        sample_weight=None,
+        initial_epoch=0,
+        steps_per_epoch=1,
+        validation_steps=None,
+        validation_batch_size=None,
+        validation_freq=1,
+        max_queue_size=10,
+        workers=1,
+        use_multiprocessing=False
+    )
 
 
 if __name__ == '__main__':
