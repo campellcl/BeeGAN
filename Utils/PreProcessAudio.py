@@ -53,7 +53,7 @@ class AudioPreprocessor:
         cwd = os.getcwd()
         output_file_path = os.path.join(self.output_data_dir, 'transformed_data.npz')
         if self.is_debug:
-            print('Saving transformed (down-sampled or up-sampled) audio files to location: \'%s\'')
+            print('Saving transformed (down-sampled or up-sampled) audio files to location: \'%s\'' % output_file_path)
         os.chdir(self.output_data_dir)
         np.savez(output_file_path, transformed_audio)
         os.chdir(cwd)
