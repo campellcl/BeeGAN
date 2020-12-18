@@ -1,5 +1,6 @@
 import os
 import argparse
+import copy
 import numpy as np
 import tensorflow as tf
 
@@ -9,7 +10,8 @@ def make_pca_gan_model(receptive_field_size: int, train_batch_size: int, num_uni
         tf.keras.layers.InputLayer(input_shape=receptive_field_size, batch_size=train_batch_size, name='input_layer'),
         tf.keras.layers.Dense(units=num_units_h1, use_bias=True, kernel_initializer='random_uniform',
                               bias_initializer='ones', kernel_regularizer=None, kernel_constraint=None,
-                              bias_constraint=None, activation=activation_h1, name='h1')
+                              bias_constraint=None, activation=activation_h1, name='h1'),
+        tf.keras.layers.Dense(units=receptive_field_size, batch_size=train_batch_size, name='output_layer')
         ]
     )
     return model
@@ -27,21 +29,21 @@ def main(args):
         if is_debug:
             print('sample data shape: %s' % (X.shape, ))
     # TODO: Do the train-test-val partition here (after obtaining more data):
-    train_data = X
+    train_data, train_targets = X, copy.deepcopy(X)
     # Create the model:
     pca_gan_model = make_pca_gan_model(
         receptive_field_size=train_data.shape[1],
         train_batch_size=train_data.shape[0],
         num_units_h1=2,
-        activation_h1=tf.nn.leaky_relu
+        activation_h1=None
     )
     if is_debug:
         pca_gan_model.summary()
     # Compile the model:
     pca_gan_model.compile(
         optimizer='rmsprop',
-        loss=None,
-        metrics='rmse',
+        loss='MSE',
+        metrics=['MSE'],
         loss_weights=None,
         weighted_metrics=None,
         run_eagerly=None
@@ -49,10 +51,10 @@ def main(args):
     # Fit the model to the training data:
     pca_gan_model.fit(
         x=train_data,
-        y=None,
+        y=train_targets,
         batch_size=train_data.shape[0],
-        epochs=1,
-        verbose=1,
+        epochs=10,
+        verbose=2,
         callbacks=None,
         validation_split=0.0,
         validation_data=None,
