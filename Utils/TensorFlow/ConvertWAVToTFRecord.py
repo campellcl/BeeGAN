@@ -1,12 +1,17 @@
 import os
 import argparse
-from typing import List, Tuple
+from typing import List, Tuple, Union
 import glob
 import numpy as np
 import math
 import tensorflow as tf
 import librosa
-from scipy.signal import spectrogram
+from scipy import signal
+from multiprocessing import Pool, cpu_count
+from tqdm import tqdm
+import datetime
+from dateutil import rrule
+import pandas as pd
 from Utils.EnumeratedTypes.DatasetSplitType import DatasetSplitType
 
 
@@ -18,9 +23,45 @@ _DEFAULT_VAL_SIZE = .20         # 20%
 MAXIMUM_SHARD_SIZE = 200        # in bytes (200 MB)
 
 
-def _tf_float_feature(floats: List[float]):
-    # float32
+def _bytes_feature(value):
+    # The following functions can be used to convert a value to a type compatible
+    # with tf.train.Example.
+    """Returns a bytes_list from a string / byte."""
+    # see: https://www.tensorflow.org/tutorials/load_data/tfrecord#tftrainexample
+    if isinstance(value, type(tf.constant(0))):
+        value = value.numpy() # BytesList won't unpack a string from an EagerTensor.
+    return tf.train.Feature(bytes_list=tf.train.BytesList(value=[value]))
+
+def _tf_float_feature(floats: List[Union[float, np.double]]):
+    # The following functions can be used to convert a value to a type compatible
+    # with tf.train.Example.
+    """Returns a float_list from a float / double."""
+    # see: https://www.tensorflow.org/tutorials/load_data/tfrecord#tftrainexample
     return tf.train.Feature(float_list=tf.train.FloatList(value=floats))
+
+def _int64_feature(value):
+    # The following functions can be used to convert a value to a type compatible
+    # with tf.train.Example.
+    """Returns an int64_list from a bool / enum / int / uint."""
+    # see: https://www.tensorflow.org/tutorials/load_data/tfrecord#tftrainexample
+    return tf.train.Feature(int64_list=tf.train.Int64List(value=[value]))
+
+def _parallelize(func, data):
+    """
+    _parallelize: Basic data parallelism via subprocess orchestrated by a multiprocessing Pool. This method applies the
+     provided function (funct) to every item of the provided iterable (data).
+    see: https://docs.python.org/3.8/library/multiprocessing.html#multiprocessing.pool.Pool
+    see: https://docs.python.org/3.8/library/multiprocessing.html#multiprocessing.pool.Pool.imap_unordered
+    Source: https://gist.github.com/dschwertfeger/3288e8e1a2d189e5565cc43bb04169a1#file-convert-py-L180
+    :param func: <func> The function to apply to the specified data.
+    :param data: <iterable> The iterable data which the specified function should be applied/mapped to.
+    :return None:
+    """
+    num_available_cpu_cores = cpu_count() - 1
+    # Provide the number of worker processes to use to Pool during instantiation (save a core for the parent process):
+    with Pool(num_available_cpu_cores) as pool:
+        # To display progress with tqdm we need an enclosing list statement (per https://stackoverflow.com/a/45276885/1663506):
+        list(tqdm(pool.imap_unordered(func, data), total=len(data)))
 
 
 class ConvertWAVToTFRecord:
@@ -45,6 +86,7 @@ class ConvertWAVToTFRecord:
         :param test_size: <float> The percentage of the total dataset that should be allocated to the test set.
         :param val_size: <float> The percentage of the total dataset that should be allocated to the validation set.
         :param is_debug:
+        see: https://pandas.pydata.org/pandas-docs/stable/user_guide/timeseries.html
         """
         self._root_data_dir: str = root_data_dir
         self._output_data_dir: str = output_data_dir
@@ -56,6 +98,59 @@ class ConvertWAVToTFRecord:
         self._seed: int = seed
         np.random.seed(self._seed)
         self._audio_file_paths: List[str] = self.get_all_audio_file_paths_in_root_data_dir()
+        # ISO Parse and then associate each audio file with a datetime stamp:
+        df = pd.DataFrame(data=self._audio_file_paths, columns=['file_path'])
+        df["rpi"] = ""
+        df["iso_8601"] = ""
+        df["date"] = ""
+        # Parse the file name into a datetime obj:
+        for i, row in df.iterrows():
+            base_name = os.path.basename(row['file_path'])
+            meta_data = base_name.split('@')
+            rpi_id = meta_data[0]
+            date_str: str = meta_data[1]
+            split_date: List[str] = date_str.split('-')
+            year: int = int(split_date[0])
+            month: int = int(split_date[1])
+            day: int = int(split_date[2])
+            time_str = meta_data[2].split('.wav')[0]
+            split_time: List[str] = time_str.split('-')
+            hour: int = int(split_time[0])
+            minute: int = int(split_time[1])
+            second: int = int(split_time[2])
+            date: datetime.datetime = datetime.datetime(
+                year=year, month=month, day=day, hour=hour, minute=minute, second=second
+            )
+            date_iso_8601: str = date.isoformat()
+            df.at[i, 'rpi'] = rpi_id
+            df.at[i, 'iso_8601'] = date_iso_8601
+        # Sort all audio file paths by datetime in ascending order:
+        df["date"] = pd.to_datetime(df.iso_8601)
+        df = df.sort_values(by="date")
+        # Iterate by year over all the existing data:
+        for year in df['date'].dt.year.unique():
+            year_df_subset = df[df['date'].dt.year == year]
+            # Iterate by week over all the existing data in the year:
+            for week in year_df_subset['date'].dt.week.unique():
+                week_df_subset = year_df_subset[year_df_subset['date'].dt.week == week]
+                days_in_week_df_subset = None
+                pass
+
+
+
+
+        # df_week_start_index_inclusive: int = 0
+        # df_week_end_index_inclusive: int = -1
+        # for dt in rrule.rrule(rrule.WEEKLY, dtstart=df.iloc[0]['date'], until=df.iloc[-1]['date']):
+        #     df_start_index_inclusive: int = df.loc[df['iso_8601'] == dt.isoformat()].index[0]
+        # TODO: Sort by datetime and chunk into 1 week segments.
+        # TODO: Randomly select 4 days for train and 1 for test and 2 for val out of each week
+        # TODO: For each week, randomize the ordering of the file paths in the respective train test and val splits
+        # TODO: Perform pre-processing on each sample and write a separate TFRecord file for each split of the dataset.
+
+
+
+
         '''
         Here we shuffle the ordering of the audio sample files so they don't end up encoded sequentially in the same
          TFRecord shards. We do this shuffling here (instead of prior to training) because (to my knowledge) there is 
@@ -69,6 +164,8 @@ class ConvertWAVToTFRecord:
         self._num_test_samples: int = math.ceil(self._num_samples * test_size)
         self._num_val_samples: int = math.ceil(self._num_samples * val_size)
         self._num_train_samples: int = self._num_samples - self._num_test_samples - self._num_val_samples
+
+
         # Split the list of audio file paths into train, test, and val sets:
         self.train_file_paths: List[str] = self._audio_file_paths[0: self._num_train_samples]
         self.val_file_paths: List[str] = self._audio_file_paths[self._num_train_samples: (self._num_train_samples + self._num_val_samples)]
@@ -86,14 +183,35 @@ class ConvertWAVToTFRecord:
         Source: https://gist.github.com/dschwertfeger/3288e8e1a2d189e5565cc43bb04169a1
         :return tf_record_shard_size: <int> The number of samples to contain in a single TFRecord shard.
         """
-        num_bytes_per_mebibyte = 1024**2
+        num_bytes_per_mebibyte = 1024 ** 2
         maximum_bytes_per_shard = (MAXIMUM_SHARD_SIZE * num_bytes_per_mebibyte)  # 200 MB maximum
         # TODO: Ask Dr. Parry why the sample rate is multiplied by 2 for 16-bit audio, what is it in our case?
-        audio_bytes_per_second = self.sample_rate * 2   # 16-bit audio
+        audio_bytes_per_second = self.sample_rate * 2  # 16-bit audio
         audio_bytes_total = audio_bytes_per_second * self.audio_duration
         tf_record_shard_size = maximum_bytes_per_shard // audio_bytes_total
         # TODO: Do we want to apply compression to the TFRecord files, will this compression be lossless enough?
         return tf_record_shard_size
+        #
+        # num_bytes_per_mebibyte = 1024**2
+        # maximum_bytes_per_shard = (MAXIMUM_SHARD_SIZE * num_bytes_per_mebibyte)  # 200 MiB maximum
+        # https://www.cs.princeton.edu/courses/archive/spring07/cos116/labs/COS_116_Lab_4_Solns.pdf (page 9/11):
+        # https://homes.cs.washington.edu/~thickstn/spectrograms.html
+        # We will use scipy.signal.spectrogram, so we will compute the storage requirements in MiB of a single shard...
+        # num_samples_in_audio_signal: int = self.sample_rate * self.audio_duration  # The number of float samples in the audio signal (default: 480,000)
+        # https://www.princeton.edu/~cuff/ele201/files/spectrogram.pdf
+        # https://ocw.mit.edu/courses/mathematics/18-06sc-linear-algebra-fall-2011/positive-definite-matrices-and-applications/complex-matrices-fast-fourier-transform-fft/MIT18_06SCF11_Ses3.2sum.pdf
+        # closest_power_of_two_to_provided_sample_rate: int = math.ceil(np.log2(self.sample_rate))
+        # TODO: Dr. Parry, are the microphones for the beemon data monophonic?
+        # TODO: Dr. Parry, how many bytes per sample per channel?
+        # TODO: Ask Dr. Parry why the sample rate is multiplied by 2 for 16-bit audio, what is it in our case?
+        # audio_bytes_per_second = self.sample_rate * 2   # 16-bit audio
+        # TODO: How many bytes if we decide to encode the spectrogram as a TFRecord and save that?
+        ''' Determine how many bytes it will take to encode the spectrogram: '''
+        # num_samples_in_spectrogram =
+        # audio_bytes_total = audio_bytes_per_second * self.audio_duration
+        # tf_record_shard_size = maximum_bytes_per_shard // audio_bytes_total
+        # TODO: Do we want to apply compression to the TFRecord files, will this compression be lossless enough?
+        # return tf_record_shard_size
 
     def _determine_total_number_of_shards(self, num_samples: int):
         """
@@ -184,37 +302,73 @@ class ConvertWAVToTFRecord:
         :return:
         """
         shard_path, shard_audio_file_paths = shard_data
-        with tf.io.TFRecordWriter(shard_path, options='ZLIB') as out:
+        with tf.io.TFRecordWriter(shard_path, options='ZLIB') as writer:
             for audio_file_path in shard_audio_file_paths:
+                # The spectrogram will be the same dimensionality at
+                # Read in the audio at the specified file path while re-sampling it at the specified rate:
                 audio, sample_rate = librosa.load(audio_file_path, sr=self.sample_rate)
-                ''' Constrain the audio to be one second in length: '''
-                # The desired number of floats in the audio file is dictated by the (sample_rate * audio_duration):
-                desired_signal_length = self.sample_rate * self.audio_duration
-                if len(audio) > desired_signal_length:
-                    audio = np.array(audio[0:desired_signal_length])
-                elif len(audio) < desired_signal_length:
-                    # TODO: Ask Dr. Parry if we should zero-pad the audio file?
-                    num_zeros_to_pad_with = len(audio) - desired_signal_length
-                    audio = np.pad(audio, (num_zeros_to_pad_with, 0))
-                assert len(audio) == desired_signal_length
                 ''' Apply the Fourier transform: '''
-                # Determine the closest power of two to the provided sample rate:
+                # Determine the closest power of two to the provided audio sample rate:
                 closest_power_of_two_to_provided_sample_rate: int = math.ceil(np.log2(self.sample_rate))
                 # The nperseg argument of the Fourier transform is constrained to be a power of two, choose the closest
-                # to the sample rate for increased accuracy:
-                num_per_segment: int = 2**closest_power_of_two_to_provided_sample_rate
-                # Choose to overlap the audio segments by 50% (hence the division by two):
-                num_points_to_overlap: int = num_per_segment // 2
-                freqs, time_segs, spectra = spectrogram(audio, nperseg=num_per_segment, noverlap=num_points_to_overlap)
+                # to the audio sample rate for increased accuracy:
+                num_per_segment: int = 2 ** closest_power_of_two_to_provided_sample_rate
+                # tf_example = tf.train.Example(features=tf.train.Features(
+                #     feature={
+                #         'ISO_8601': parsed_time_stamp
+                #     }
+                # ))
+
+                ''' Parse the filename into a datetime object '''
+                # TODO: Parse the filename into a datetime object
+
+
+                # We use the default overlap by 1/8th:
+                # num_points_to_overlap: int = num_per_segment // 8
+                # freqs will be the same as long as the sample rate and num per seg is the same.
+                # same thing with the time segments. You could have freq, magnitude, and num seconds since january first 1970 as features (0-23 for the hour of the day, and then the minute and second)
+                freqs, time_segs, spectrogram = signal.spectrogram(audio, nperseg=num_per_segment)
+                # Compute the length of each time segment:
+                time_segment_duration: float = time_segs[1] - time_segs[0]
+                # TODO:
+                # TODO: Offset the time mentioned in datetime object by the first segment time:
+
+
+
+                # To make the train, val, test we would want to separate the audio into days....
+                # Partition train, val, and test by day. so we dont end up with lawnmower in the train and test too easy to predict.
+
+                # Lets just focus on this hive (rpi4-2), lets start with one hive for one year, and we will.... 60 train, 20 val, 20 test. Split by day. Three days train, one day validation, one day test.
+                # Could take the first five days and randomly select one for train, one for test, and one for validation.
+                # Randomly select 60% of the days for training, 20% for validation, 20% for testing.
+                # Each day has 147 files, (roughly 30 GB total) 158 records total (given a 200 MB maximum TFRecord size).
+                # How big is the numpy array you come up with if you take each minute, run the spectrogram, concatenate all of them together into one big thing, is that more than one records worth for tensorflow (for a single day)?
+                # There would be 2 million spectra/rows in the entire dataset. You could certaintly permute the indices of a list of 2million to create that random ordering. Cycle through that list once for each record filling it up with the samples it shoudl contain.
+                # Shuffle each one within the TFRecord...
+
+                # What if we made a record for every day, and decided day-by-day which one belongs in the training, validation, and testing. How would we handle the train, val, test split across multiple TFRecord files.
+                # Figure out how much (a whole day?, half a day?) will fit into one 200 MB TFRecord... we could pick a time that is the half way point (say 1:00) it goes from 7:30 AM to 7:30 PM at night.
+                # We would like to have a random ordering of total spectra in the training set. But if we made these and decided that certain days were part of the training step, as an extra process we could try to randomize the order of the TFRecord
+                # Figure out how many records, create a new record each time from the permutation of total indices in teh training set. Randomize the samples within a record but beyond that whatever.
+                # Get an assortment of days or half days in your batch that you update with from one pass.
+
+                # TODODOD:
+                # 1. Can we fit an entire day within one TFRecord, play with the parameters a little bit if its close (slightly fewer spectra, use floats instead of doubles)
+                # 2. If we can't fit within one TFRecord, then split it in half. Put half of the records in one file with the same name (date) of the audio file (date part 1 and part 2) Save the best guess as the time that this happened, the 't' variable in the output spectrogram.
+                #   add that in the time that's in the file name and get a different time date stamp for every spectrum. The day of the year, the hour of the day (could be fractional) in two numbers you could capture seasonal and where is the sun roughly.
+                # 3.
+
+                # One sample will NOT correspond to one audio file. Instead we will have multiple spectra per sample
+
                 ''' Create the TFRecord file: '''
-                tf_example = tf.train.Example(features=tf.train.Features(
-                    feature={
-                        # TODO: Ask Dr. Parry if we should serialize the entire spectra? Or just the audio file?
-                        #  Probably depends on the loading procedures for TFRecord files.
-                        'audio_spectrogram': ???
-                    }
-                ))
-                print('woa')
+                # tf_example = tf.train.Example(features=tf.train.Features(
+                #     feature={
+                #         # TODO: Ask Dr. Parry if we should serialize the entire spectra? Or just the audio file?
+                #         #  Probably depends on the loading procedures for TFRecord files.
+                #         'audio_spectrogram': ???
+                #     }
+                # ))
+                # print('woa')
 
 
     def perform_conversion(self):
