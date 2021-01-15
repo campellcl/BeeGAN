@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import datetime
+from typing import List
 
 # Create dataset
 np.random.seed(123)
@@ -35,12 +36,16 @@ def perform_weekly_train_val_test_split(week_data: pd.Series):
     # Randomly select from day-of-week indices [0-6] inclusive, 4 days for train, 2 for val, 1 for test
     day_of_week_indices = np.arange(0, 7)
     day_of_week_indices = np.random.permutation(day_of_week_indices)
-    train_days = day_of_week_indices[0: 4]
+    train_days: np.ndarray = day_of_week_indices[0: 4]
     val_days = day_of_week_indices[4: 6]
     test_day = day_of_week_indices[-1]
-    train_meta_series: pd.Series = week_data[week_data['day_of_week'] in train_days]
+    week_train_meta_data_series: pd.Series = week_data.query('day_of_week in @train_days')
+    week_val_meta_data_series: pd.Series = week_data.query('day_of_week in @val_days')
+    week_test_meta_data_series: pd.Series = week_data.query('day_of_week == @test_day')
+    # TODO: Append each series to their respective train/val/test dataframes:
+
     # Return separate train, test, and val pd.Series for audio files belonging to the specified days of the week:
-    return week_data['date'].dt.dayofweek.count()
+    return week_train_meta_data_series, week_val_meta_data_series, week_test_meta_data_series
 
 df.groupby('yr_week_grp_idx').apply(perform_weekly_train_val_test_split)
 
