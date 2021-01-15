@@ -98,43 +98,17 @@ class ConvertWAVToTFRecord:
         self._seed: int = seed
         np.random.seed(self._seed)
         self._audio_file_paths: List[str] = self.get_all_audio_file_paths_in_root_data_dir()
-        # ISO Parse and then associate each audio file with a datetime stamp:
-        df = pd.DataFrame(data=self._audio_file_paths, columns=['file_path'])
-        df["rpi"] = ""
-        df["iso_8601"] = ""
-        df["date"] = ""
-        # Parse the file name into a datetime obj:
-        for i, row in df.iterrows():
-            base_name = os.path.basename(row['file_path'])
-            meta_data = base_name.split('@')
-            rpi_id = meta_data[0]
-            date_str: str = meta_data[1]
-            split_date: List[str] = date_str.split('-')
-            year: int = int(split_date[0])
-            month: int = int(split_date[1])
-            day: int = int(split_date[2])
-            time_str = meta_data[2].split('.wav')[0]
-            split_time: List[str] = time_str.split('-')
-            hour: int = int(split_time[0])
-            minute: int = int(split_time[1])
-            second: int = int(split_time[2])
-            date: datetime.datetime = datetime.datetime(
-                year=year, month=month, day=day, hour=hour, minute=minute, second=second
-            )
-            date_iso_8601: str = date.isoformat()
-            df.at[i, 'rpi'] = rpi_id
-            df.at[i, 'iso_8601'] = date_iso_8601
-        # Sort all audio file paths by datetime in ascending order:
-        df["date"] = pd.to_datetime(df.iso_8601)
-        df = df.sort_values(by="date")
-        # Iterate by year over all the existing data:
-        for year in df['date'].dt.year.unique():
-            year_df_subset = df[df['date'].dt.year == year]
-            # Iterate by week over all the existing data in the year:
-            for week in year_df_subset['date'].dt.week.unique():
-                week_df_subset = year_df_subset[year_df_subset['date'].dt.week == week]
-                days_in_week_df_subset = None
-                pass
+        # Create a metadata dataframe with time series information:
+        beemon_meta_df: pd.DataFrame = self._create_beemon_metadata_df(
+            all_audio_file_paths=self._audio_file_paths
+        )
+        # Do the train, test, val, split partition:
+        meta_train_df, meta_val_df, meta_test_df = self.train_test_val_split(
+            beemon_meta_df=beemon_meta_df
+        )
+        # Create an index
+
+
 
 
 
@@ -174,6 +148,91 @@ class ConvertWAVToTFRecord:
         self._num_train_shards: int = self._determine_total_number_of_shards(num_samples=self.num_train_samples)
         self._num_val_shards: int = self._determine_total_number_of_shards(num_samples=self.num_val_samples)
         self._num_test_shards: int = self._determine_total_number_of_shards(num_samples=self._num_test_samples)
+
+    def _create_beemon_metadata_df(self) -> pd.DataFrame:
+        """
+        _create_beemon_metadata_df: Creates a pandas dataframe with all audio file paths, and the file name parsed as a
+         valid datetime object; then sorts the dataframe by date in ascending order.
+        :return df: <pd.DataFrame> A dataframe comprised of each audio file path, the iso_8601 string representation of
+         the specified date and time in the file path name, and the datetime object itself (sorted in ascending order
+         by date).
+        """
+        # ISO Parse and then associate each audio file with a datetime stamp:
+        df = pd.DataFrame(data=self._audio_file_paths, columns=['file_path'])
+        df["rpi"] = ""
+        df["iso_8601"] = ""
+        df["date"] = ""
+
+        # Parse the file name into a datetime obj:
+        for i, row in df.iterrows():
+            base_name = os.path.basename(row['file_path'])
+            meta_data = base_name.split('@')
+            rpi_id = meta_data[0]
+            date_str: str = meta_data[1]
+            split_date: List[str] = date_str.split('-')
+            year: int = int(split_date[0])
+            month: int = int(split_date[1])
+            day: int = int(split_date[2])
+            time_str = meta_data[2].split('.wav')[0]
+            split_time: List[str] = time_str.split('-')
+            hour: int = int(split_time[0])
+            minute: int = int(split_time[1])
+            second: int = int(split_time[2])
+            date: datetime.datetime = datetime.datetime(
+                year=year, month=month, day=day, hour=hour, minute=minute, second=second
+            )
+            date_iso_8601: str = date.isoformat()
+            df.at[i, 'rpi'] = rpi_id
+            df.at[i, 'iso_8601'] = date_iso_8601
+        # Sort all audio file paths by datetime in ascending order:
+        df["date"] = pd.to_datetime(df.iso_8601)
+        df = df.sort_values(by="date")
+        # Split the date into multiple columns for ease of access with groupby:
+        df['year'] = df['date'].dt.year
+        df['week'] = df['date'].dt.week
+        df['day_of_year'] = df['date'].dt.day
+        df['day_of_week'] = df['date'].dt.dayofweek
+        return df
+
+    def train_test_val_split(self, beemon_meta_df: pd.DataFrame):
+        """
+        train_test_val_split: Splits the metadata dataframe (containing all audio file paths and associated dates) into
+         into train, val, and test datasets. The dataframe will be partitioned weekly, and from within each week, data
+         from a random subset of days will be copied to a train, validation, or testing dataframe. Four random days in
+         every week will be allocated to training data, 2 days for validation data, and 1 day for testing data. Each
+         respective train/test/val dataframe will be sorted by date in ascending order.
+        :param beemon_meta_df:
+        :return:
+        """
+        train_meta_df: pd.DataFrame
+        val_meta_df: pd.DataFrame
+        test_meta_df: pd.DataFrame
+
+        beemon_meta_df['yr_week_grp_idx'] = beemon_meta_df['date'].apply(
+            lambda x: '%s-%s' % (x.year, '{:02d}'.format(x.week)))
+
+        # Iterate by year over all the existing data:
+        # for year in df['date'].dt.year.unique():
+        #     year_df_subset = df[df['date'].dt.year == year]
+        #     # Iterate by week over all the existing data in the year:
+        #     for week in year_df_subset['date'].dt.week.unique():
+        #         week_df_subset = year_df_subset[year_df_subset['date'].dt.week == week]
+        #         days_in_week_df_subset = None
+        #         pass
+
+        def perform_weekly_train_val_test_split(week_metadata: pd.Series) -> Tuple[pd.Series, pd.Series, pd.Series]:
+            # Select a random subset of day-of-the-week indices [0-6] to be training, val, and test data:
+            day_of_week_indices = np.arange(0, 7)
+            # Shuffle the index array:
+            day_of_week_indices = np.random.permutation(day_of_week_indices)
+            train_days = day_of_week_indices[0: 4]
+            val_days = day_of_week_indices[4: 6]
+            test_day = day_of_week_indices[-1]
+            train_meta_series: pd.Series = week_metadata[week_metadata['day_of_week'] in train_days]
+
+        # Partition each dataframe weekly:
+        beemon_meta_df.groupby('yr_week_grp_idx').apply(perform_weekly_train_val_test_split)
+        raise NotImplementedError
 
     def _determine_shard_size(self):
         """
@@ -330,27 +389,7 @@ class ConvertWAVToTFRecord:
                 freqs, time_segs, spectrogram = signal.spectrogram(audio, nperseg=num_per_segment)
                 # Compute the length of each time segment:
                 time_segment_duration: float = time_segs[1] - time_segs[0]
-                # TODO:
                 # TODO: Offset the time mentioned in datetime object by the first segment time:
-
-
-
-                # To make the train, val, test we would want to separate the audio into days....
-                # Partition train, val, and test by day. so we dont end up with lawnmower in the train and test too easy to predict.
-
-                # Lets just focus on this hive (rpi4-2), lets start with one hive for one year, and we will.... 60 train, 20 val, 20 test. Split by day. Three days train, one day validation, one day test.
-                # Could take the first five days and randomly select one for train, one for test, and one for validation.
-                # Randomly select 60% of the days for training, 20% for validation, 20% for testing.
-                # Each day has 147 files, (roughly 30 GB total) 158 records total (given a 200 MB maximum TFRecord size).
-                # How big is the numpy array you come up with if you take each minute, run the spectrogram, concatenate all of them together into one big thing, is that more than one records worth for tensorflow (for a single day)?
-                # There would be 2 million spectra/rows in the entire dataset. You could certaintly permute the indices of a list of 2million to create that random ordering. Cycle through that list once for each record filling it up with the samples it shoudl contain.
-                # Shuffle each one within the TFRecord...
-
-                # What if we made a record for every day, and decided day-by-day which one belongs in the training, validation, and testing. How would we handle the train, val, test split across multiple TFRecord files.
-                # Figure out how much (a whole day?, half a day?) will fit into one 200 MB TFRecord... we could pick a time that is the half way point (say 1:00) it goes from 7:30 AM to 7:30 PM at night.
-                # We would like to have a random ordering of total spectra in the training set. But if we made these and decided that certain days were part of the training step, as an extra process we could try to randomize the order of the TFRecord
-                # Figure out how many records, create a new record each time from the permutation of total indices in teh training set. Randomize the samples within a record but beyond that whatever.
-                # Get an assortment of days or half days in your batch that you update with from one pass.
 
                 # TODODOD:
                 # 1. Can we fit an entire day within one TFRecord, play with the parameters a little bit if its close (slightly fewer spectra, use floats instead of doubles)
@@ -359,16 +398,12 @@ class ConvertWAVToTFRecord:
                 # 3.
 
                 # One sample will NOT correspond to one audio file. Instead we will have multiple spectra per sample
-
                 ''' Create the TFRecord file: '''
                 # tf_example = tf.train.Example(features=tf.train.Features(
                 #     feature={
-                #         # TODO: Ask Dr. Parry if we should serialize the entire spectra? Or just the audio file?
-                #         #  Probably depends on the loading procedures for TFRecord files.
                 #         'audio_spectrogram': ???
                 #     }
                 # ))
-                # print('woa')
 
 
     def perform_conversion(self):
