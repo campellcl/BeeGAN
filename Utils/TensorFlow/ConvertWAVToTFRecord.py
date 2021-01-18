@@ -70,7 +70,6 @@ class ConvertWAVToTFRecord:
      writes TFRecord shards to the specified output directory, in parallel, leveraging the number of CPU cores on the
      executing machine, and estimates the ideal maximum size of the TFRecord shards in accordance with the
      recommendations provided by the TensorFlow documentation: https://www.tensorflow.org/tutorials/load_data/tfrecord
-
     """
 
     def __init__(self, root_data_dir: str, output_data_dir: str, audio_duration: int, sample_rate: int,
@@ -98,31 +97,31 @@ class ConvertWAVToTFRecord:
         self._seed: int = seed
         np.random.seed(self._seed)
         self._audio_file_paths: List[str] = self.get_all_audio_file_paths_in_root_data_dir()
-        # Create a metadata dataframe with time series information:
-        beemon_meta_df: pd.DataFrame = self._create_beemon_metadata_df(
-            all_audio_file_paths=self._audio_file_paths
+        self._num_samples: int = len(self._audio_file_paths)
+        # Create a metadata dataframe by augmenting the list of all audio file paths with time information (from the
+        # file names):
+        beemon_df: pd.DataFrame = self._create_beemon_metadata_df()
+        # Do the train, test, val, split partition of the metadata dataframe (prior to sharding each dataset):
+        train_df, val_df, test_df = self._train_test_val_split(
+            beemon_df=beemon_df
         )
-        # Do the train, test, val, split partition:
-        meta_train_df, meta_val_df, meta_test_df = self.train_test_val_split(
-            beemon_meta_df=beemon_meta_df
-        )
-        # Create an index
+        # Retain summary statistics:
+        self._num_train_samples: int = train_df.shape[0]
+        self._num_val_samples: int = val_df.shape[0]
+        self._num_test_samples: int = test_df.shape[0]
 
-
-
-
-
+        # TODO: Iterate over each day in each dataframe (sequentially) and perform pre-processing on each day's worth of audio files.
+        # TODO: For each day, concatenate the produced spectrograms together, and determine how many TFRecord files will
+        #  be required to store each day's worth of data.
+        # TODO: Shuffle the concatenated spectrogram for each day, and then write each day to TFRecord files. Keep the
+        #  train, val, and test TFRecord files separate (either by directory or filename).
+        # TODO: Write a TFRecord DataSet reader which reads these TFRecord files and reconstructs a TFDataset object
+        #  for each split of the dataset (train, val, test)
 
         # df_week_start_index_inclusive: int = 0
         # df_week_end_index_inclusive: int = -1
         # for dt in rrule.rrule(rrule.WEEKLY, dtstart=df.iloc[0]['date'], until=df.iloc[-1]['date']):
         #     df_start_index_inclusive: int = df.loc[df['iso_8601'] == dt.isoformat()].index[0]
-        # TODO: Sort by datetime and chunk into 1 week segments.
-        # TODO: Randomly select 4 days for train and 1 for test and 2 for val out of each week
-        # TODO: For each week, randomize the ordering of the file paths in the respective train test and val splits
-        # TODO: Perform pre-processing on each sample and write a separate TFRecord file for each split of the dataset.
-
-
 
 
         '''
@@ -130,7 +129,7 @@ class ConvertWAVToTFRecord:
          TFRecord shards. We do this shuffling here (instead of prior to training) because (to my knowledge) there is 
          no efficient random access to TFRecord objects (see: https://stackoverflow.com/q/35657015/3429090). The 
          sequential hard drive reads during the retrieval of the TFRecord files are preferred for performance reasons.
-         For this reason TFRecord files can apparently only be read sequentially (see: 
+         For this reason TFRecord files can apparently only be read from disk sequentially (see: 
          https://www.tensorflow.org/tutorials/load_data/tfrecord#tfrecords_format_details)
         '''
         np.random.shuffle(self._audio_file_paths)
@@ -187,40 +186,85 @@ class ConvertWAVToTFRecord:
         # Sort all audio file paths by datetime in ascending order:
         df["date"] = pd.to_datetime(df.iso_8601)
         df = df.sort_values(by="date")
-        # Split the date into multiple columns for ease of access with groupby:
+        # Split the date into multiple columns for ease of access:
         df['year'] = df['date'].dt.year
         df['week'] = df['date'].dt.week
         df['day_of_year'] = df['date'].dt.day
         df['day_of_week'] = df['date'].dt.dayofweek
+        '''
+        Add a grouping index to the dataframe for partitioning on the unique ordinal week value AND a unique month 
+         value. Note that this is necessary because of a duplicated ordinal week value in some of the ISO calendar years
+         (see: https://stackoverflow.com/q/62680813/3429090):
+        '''
+        df['yr_week_grp_idx'] = df['date'].apply(
+            lambda x: '%s-%s' % (x.year, '{:02d}'.format(x.week)))
         return df
 
-    def train_test_val_split(self, beemon_meta_df: pd.DataFrame):
+    @staticmethod
+    def _train_test_val_split(beemon_df: pd.DataFrame):
         """
         train_test_val_split: Splits the metadata dataframe (containing all audio file paths and associated dates) into
          into train, val, and test datasets. The dataframe will be partitioned weekly, and from within each week, data
          from a random subset of days will be copied to a train, validation, or testing dataframe. Four random days in
          every week will be allocated to training data, 2 days for validation data, and 1 day for testing data. Each
-         respective train/test/val dataframe will be sorted by date in ascending order.
-        :param beemon_meta_df:
-        :return:
+         respective train/test/val dataframe produced will be sorted (by datetime) in ascending order.
+        :param beemon_df: <pd.DataFrame> The metadata dataframe containing all sample data (audio file paths and parsed
+         datetime data).
+        :returns train_df, val_df, test_df:
+        :return train_df: <pd.DataFrame> A subset of the provided beemon_df produced by iterating sequentially over each
+         ISO 8601 calendar week in the source beemon_df, randomly permuting the days in each week, and selecting a
+         subset of those days.
+        :return val_df: <pd.DataFrame> A subset of the provided beemon_df produced by iterating sequentially over each
+         ISO 8601 calendar week in the source beemon_df, randomly permuting the days in each week, and selecting a
+         subset of those days.
+        :return test_df: <pd.DataFrame> A subset of the provided beemon_df produced by iterating sequentially over each
+         ISO 8601 calendar week in the source beemon_df, randomly permuting the days in each week, and selecting a
+         subset of those days.
         """
-        train_meta_df: pd.DataFrame
-        val_meta_df: pd.DataFrame
-        test_meta_df: pd.DataFrame
+        # Empty placeholder dataframes which will contain the records from the partitioned parent dataframe:
+        train_df: pd.DataFrame = pd.DataFrame(
+            data=None,
+            index=None,
+            columns=['file_path', 'rpi', 'iso_8601', 'date', 'year', 'week', 'day_of_year', 'day_of_week']
+        )
+        val_df: pd.DataFrame = pd.DataFrame(
+            data=None,
+            index=None,
+            columns=['file_path', 'rpi', 'iso_8601', 'date', 'year', 'week', 'day_of_year', 'day_of_week']
+        )
+        test_df: pd.DataFrame = pd.DataFrame(
+            data=None,
+            index=None,
+            columns=['file_path', 'rpi', 'iso_8601', 'date', 'year', 'week', 'day_of_year', 'day_of_week']
+        )
 
-        beemon_meta_df['yr_week_grp_idx'] = beemon_meta_df['date'].apply(
-            lambda x: '%s-%s' % (x.year, '{:02d}'.format(x.week)))
-
-        # Iterate by year over all the existing data:
-        # for year in df['date'].dt.year.unique():
-        #     year_df_subset = df[df['date'].dt.year == year]
-        #     # Iterate by week over all the existing data in the year:
-        #     for week in year_df_subset['date'].dt.week.unique():
-        #         week_df_subset = year_df_subset[year_df_subset['date'].dt.week == week]
-        #         days_in_week_df_subset = None
-        #         pass
-
-        def perform_weekly_train_val_test_split(week_metadata: pd.Series) -> Tuple[pd.Series, pd.Series, pd.Series]:
+        def perform_weekly_train_val_test_split(
+                week_data: pd.DataFrame, train_df: pd.DataFrame, val_df: pd.DataFrame, test_df: pd.DataFrame) \
+                -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+            """
+            perform_weekly_train_val_test_split: This helper method takes in existing (and initially empty) train, val,
+             and test DataFrames, alongside a week's worth of metadata; and then partitions the week's data into the
+             appropriate subset dataframes. Each provided week's worth of data is shuffled randomly (by day) and the
+             days are then split among the training, validation, and testing dataframe subsets.
+            :param week_data: A unique week in the ISO 8601 calendar year. These are the values produced by iterating
+             over the entire source metadata dataframe on week at a time (sequentially) in ascending order.
+            :param train_df: <pd.DataFrame> The existing training dataframe (subset of the parent beemon_df dataframe)
+             which should be extended with the newly partitioned data from the particular calendar week supplied to this
+             method.
+            :param val_df: <pd.DataFrame> The existing validation dataframe (subset of the parent beemon_df dataframe)
+             which should be extended with the newly partitioned data from the particular calendar week supplied to this
+             method.
+            :param test_df: <pd.DataFrame> The existing testing dataframe (subset of the parent beemon_df dataframe)
+             which should be extended with the newly partitioned data from the particular calendar week supplied to this
+             method.
+            :returns train_df, val_df, test_df:
+            :return train_df: <pd.DataFrame> The provided input dataframe concatenated with the training data from the
+             provided week.
+            :return val_df: <pd.DataFrame> The provided input dataframe concatenated with the validation data from the
+             provided week.
+            :return test_df: <pd.DataFrame> The provided input dataframe concatenated with the testing data from the
+             provided week.
+            """
             # Select a random subset of day-of-the-week indices [0-6] to be training, val, and test data:
             day_of_week_indices = np.arange(0, 7)
             # Shuffle the index array:
@@ -228,11 +272,27 @@ class ConvertWAVToTFRecord:
             train_days = day_of_week_indices[0: 4]
             val_days = day_of_week_indices[4: 6]
             test_day = day_of_week_indices[-1]
-            train_meta_series: pd.Series = week_metadata[week_metadata['day_of_week'] in train_days]
+            week_train_meta_data_series: pd.Series = week_data.query('day_of_week in @train_days')
+            week_val_meta_data_series: pd.Series = week_data.query('day_of_week in @val_days')
+            week_test_meta_data_series: pd.Series = week_data.query('day_of_week == @test_day')
+            # Append each series to their respective train/val/test dataframes:
+            train_df = train_df.append(week_train_meta_data_series)
+            val_df = val_df.append(week_val_meta_data_series)
+            test_df = test_df.append(week_test_meta_data_series)
+            # Return the updated provided dataframes:
+            return train_df, val_df, test_df
 
-        # Partition each dataframe weekly:
-        beemon_meta_df.groupby('yr_week_grp_idx').apply(perform_weekly_train_val_test_split)
-        raise NotImplementedError
+        # Group the dataframe and then iterate over the grouped object:
+        df_grouped_by_week_and_year = beemon_df.groupby('yr_week_grp_idx')
+
+        # Iterate through the unique weeks in the dataframe:
+        for year_and_week, week_data_subset in df_grouped_by_week_and_year:
+            # Split the week's data into training, validation, and testing days; then update the dataframes:
+            train_df, val_df, test_df = perform_weekly_train_val_test_split(
+                week_data=week_data_subset, train_df=train_df, val_df=val_df, test_df=test_df
+            )
+        # Return each unique dataframe:
+        return train_df, val_df, test_df
 
     def _determine_shard_size(self):
         """
