@@ -23,16 +23,23 @@ random_num = np.random.choice(
 df = pd.DataFrame({'date': date, 'random_num': random_num})
 # Sort by date in ascending order:
 df = df.sort_values(by="date")
+# Add convenience columns:
 df['year'] = df['date'].dt.year
-df['week'] = df['date'].dt.week
+df['week'] = df['date'].dt.isocalendar().week
 df['day_of_year'] = df['date'].dt.day
 df['day_of_week'] = df['date'].dt.dayofweek
+# Add a column indicating if the sample belongs to the 'train', 'val', or 'test' dataset:
+df['split'] = ""
 
 df['yr_week_grp_idx'] = df['date'].apply(
     lambda x: '%s-%s' % (x.year, '{:02d}'.format(x.week)))
 
+# Create placeholder dataframes for each of the train-val-test splits:
+train_df: pd.DataFrame = pd.DataFrame(data=None, index=None, columns=['date', 'random_num', 'year', 'week', 'day_of_year', 'day_of_week'])
+val_df: pd.DataFrame = pd.DataFrame(data=None, index=None, columns=['date', 'random_num', 'year', 'week', 'day_of_year', 'day_of_week'])
+test_df: pd.DataFrame = pd.DataFrame(data=None, index=None, columns=['date', 'random_num', 'year', 'week', 'day_of_year', 'day_of_week'])
 
-def perform_weekly_train_val_test_split(week_data: pd.Series):
+def perform_weekly_train_val_test_split(week_data: pd.Series, train_df: pd.DataFrame, val_df: pd.DataFrame, test_df: pd.DataFrame):
     # Randomly select from day-of-week indices [0-6] inclusive, 4 days for train, 2 for val, 1 for test
     day_of_week_indices = np.arange(0, 7)
     day_of_week_indices = np.random.permutation(day_of_week_indices)
@@ -42,18 +49,18 @@ def perform_weekly_train_val_test_split(week_data: pd.Series):
     week_train_meta_data_series: pd.Series = week_data.query('day_of_week in @train_days')
     week_val_meta_data_series: pd.Series = week_data.query('day_of_week in @val_days')
     week_test_meta_data_series: pd.Series = week_data.query('day_of_week == @test_day')
-    # TODO: Append each series to their respective train/val/test dataframes:
+    # Append each series to their respective train/val/test dataframes:
+    train_df = train_df.append(week_train_meta_data_series)
+    val_df = val_df.append(week_val_meta_data_series)
+    test_df = test_df.append(week_test_meta_data_series)
+    # Return the updated provided dataframes:
+    return train_df, val_df, test_df
 
-    # Return separate train, test, and val pd.Series for audio files belonging to the specified days of the week:
-    return week_train_meta_data_series, week_val_meta_data_series, week_test_meta_data_series
+# Group the dataframe and then interate over the grouped object:
+df_grouped_by_week_and_year = df.groupby('yr_week_grp_idx')
 
-df.groupby('yr_week_grp_idx').apply(perform_weekly_train_val_test_split)
+# Iterate through the unique weeks in the dataframe:
+for year_and_week, week_data_subset in df_grouped_by_week_and_year:
+    train_df, val_df, test_df = perform_weekly_train_val_test_split(week_data=week_data_subset, train_df=train_df, val_df=val_df, test_df=test_df)
 
-# for year in df['date'].dt.year.unique():
-#     year_df_subset = df[df['date'].dt.year == year]
-#     # Iterate by week over all the existing data in the year:
-#     for week in year_df_subset['date'].dt.week.unique():
-#         week_df_subset = year_df_subset[year_df_subset['date'].dt.week == week]
-#         pass
-
-print('break')
+assert (train_df.shape[0] + val_df.shape[0] + test_df.shape[0]) == df.shape[0]
