@@ -1,6 +1,6 @@
 import os
 import argparse
-from typing import List, Tuple, Union
+from typing import List, Tuple, Union, Dict
 import glob
 import numpy as np
 import math
@@ -109,8 +109,31 @@ class ConvertWAVToTFRecord:
         self._num_train_samples: int = train_df.shape[0]
         self._num_val_samples: int = val_df.shape[0]
         self._num_test_samples: int = test_df.shape[0]
+        '''
+        Pre-Process a single sample/audio file to determine the shape of the produced spectrogram given the current 
+         runtime settings. This information is required to pre-compute the shard size of the resulting TFRecords:
+        '''
+        sample = train_df.iloc[0]
+        audio_file_path: str = sample['file_path']
+        sample_iso_8601: str = sample['iso_8601']
+        # Read in the audio at the specified file path while re-sampling it at the specified rate:
+        audio, sample_rate = librosa.load(audio_file_path, sr=self.sample_rate)
+        freqs, time_segs, spectrogram = self.preprocess_audio_sample(audio_sample=audio)
+        # Now we can compute how many samples will fit within an individual TFRecord:
+        num_samples_per_tf_record_file: int = self._compute_maximum_num_samples_per_tf_record(
+            spectrogram=spectrogram,
+            iso_8601=sample_iso_8601
+        )
+        # Shard the datasets:
+        train_shards: Tuple[str, List[int]] = self.shard_dataset(
+            meta_df=train_df,
+            max_num_samples_per_shard=num_samples_per_tf_record_file,
+            dataset_split=DatasetSplitType.TRAIN
+        )
+        # TODO: Iterate over each day in each dataframe (sequentially) and perform pre-processing on each day's worth
+        #  of audio files:
+        # _ = self.preprocess_audio_data(metadata_df=train_df)
 
-        # TODO: Iterate over each day in each dataframe (sequentially) and perform pre-processing on each day's worth of audio files.
         # TODO: For each day, concatenate the produced spectrograms together, and determine how many TFRecord files will
         #  be required to store each day's worth of data.
         # TODO: Shuffle the concatenated spectrogram for each day, and then write each day to TFRecord files. Keep the
@@ -132,21 +155,147 @@ class ConvertWAVToTFRecord:
          For this reason TFRecord files can apparently only be read from disk sequentially (see: 
          https://www.tensorflow.org/tutorials/load_data/tfrecord#tfrecords_format_details)
         '''
-        np.random.shuffle(self._audio_file_paths)
-        self._num_samples: int = len(self._audio_file_paths)
-        self._num_test_samples: int = math.ceil(self._num_samples * test_size)
-        self._num_val_samples: int = math.ceil(self._num_samples * val_size)
-        self._num_train_samples: int = self._num_samples - self._num_test_samples - self._num_val_samples
-
-
+        # np.random.shuffle(self._audio_file_paths)
+        # self._num_samples: int = len(self._audio_file_paths)
+        # self._num_test_samples: int = math.ceil(self._num_samples * test_size)
+        # self._num_val_samples: int = math.ceil(self._num_samples * val_size)
+        # self._num_train_samples: int = self._num_samples - self._num_test_samples - self._num_val_samples
         # Split the list of audio file paths into train, test, and val sets:
-        self.train_file_paths: List[str] = self._audio_file_paths[0: self._num_train_samples]
-        self.val_file_paths: List[str] = self._audio_file_paths[self._num_train_samples: (self._num_train_samples + self._num_val_samples)]
-        self.test_file_paths: List[str] = self._audio_file_paths[(self.num_train_samples + self._num_val_samples)::]
+        # self.train_file_paths: List[str] = self._audio_file_paths[0: self._num_train_samples]
+        # self.val_file_paths: List[str] = self._audio_file_paths[self._num_train_samples: (self._num_train_samples + self._num_val_samples)]
+        # self.test_file_paths: List[str] = self._audio_file_paths[(self.num_train_samples + self._num_val_samples)::]
         # Determine the total number of TFRecord shards that will be necessary for each split of the dataset:
-        self._num_train_shards: int = self._determine_total_number_of_shards(num_samples=self.num_train_samples)
-        self._num_val_shards: int = self._determine_total_number_of_shards(num_samples=self.num_val_samples)
-        self._num_test_shards: int = self._determine_total_number_of_shards(num_samples=self._num_test_samples)
+        # self._num_train_shards: int = self._determine_total_number_of_shards(num_samples=self.num_train_samples)
+        # self._num_val_shards: int = self._determine_total_number_of_shards(num_samples=self.num_val_samples)
+        # self._num_test_shards: int = self._determine_total_number_of_shards(num_samples=self._num_test_samples)
+
+    def shard_dataset(self, meta_df: pd.DataFrame, max_num_samples_per_shard: int, dataset_split: DatasetSplitType):
+        """
+        shard_dataset: Breaks the provided pandas DataFrame into shards (constrained by the maximum number of samples
+         per shard).
+        :param df:
+        :param max_num_samples_per_shard:
+        :param dataset_split:
+        :return shards: List[Tuple[str, List[str]]]
+        """
+        shards: List[Tuple[str, List[str]]] = []
+
+        def shard_day(day_df: pd.DataFrame, max_num_samples_per_shard: int, dataset_split: DatasetSplitType, shard_index: int):
+            day_shards: List[Tuple[str, List[str]]] = []
+            # Determine how many shards will be needed to store the entire day subset:
+            num_shards_required_for_day: int = math.ceil(day_df.shape[0] / max_num_samples_per_shard)
+            shard_day_offset: int = 0
+            for i in range(max_num_samples_per_shard):
+                day_shard_idx: int = i + shard_day_offset
+                sample = day_df.iloc[day_shard_idx]
+                audio_file_path = sample['file_path']
+                # Read in the audio at the specified file path while re-sampling it at the specified rate:
+                audio, sample_rate = librosa.load(audio_file_path, sr=self.sample_rate)
+                # Apply the Fourier transform:
+                freqs, time_segs, spectrogram = self.preprocess_audio_sample(audio_sample=audio)
+                ''' Construct the tf.train.Example key-value dict: '''
+                # TFRecords only support 1D data, first convert the 2D array to a Tensor:
+                spectrogram_tensor: tf.Tensor = tf.convert_to_tensor(spectrogram)
+                # Then serialize the tensor to a binary string:
+                spectrogram_byte_string = tf.io.serialize_tensor(spectrogram_tensor)
+                # Do the same process with the ISO 8601 date time (convert to a tf.train.BytesList):
+                iso_8601_bytes_list: tf.train.BytesList = _bytes_feature(sample['iso_8601'])
+                tf_example: tf.train.Example = tf.train.Example(features=tf.train.Features(feature={
+                    'audio_byte_str': spectrogram_byte_string,
+                    'iso_8601_bytes_list': iso_8601_bytes_list
+                }))
+                # Construct a file path for the shard of the form 'train-001-180.tfrec':
+                shard_file_path = os.path.join(self._output_data_dir, '{}-{:03d}-{}.tfrec'.format(
+                    dataset_split.value, shard_index, ))
+
+            # # Iterate over the day's data in the metadata dataframe:
+            # for i, row in day_df.iterrows():
+            #     # Shard the data until we hit the maximum number of samples allocated per shard:
+            #     while i <= max_num_samples_per_shard:
+            #         # Construct a file path for the shard of the form 'train-001-180.tfrec':
+            #         shard_file_path = os.path.join(self._output_data_dir, '{}-{:03d}-{}.tfrec'.format(dataset_split.value, ))
+
+        # Maintain a running counter of the shard index:
+        shard_index: int = 0
+        # Iterate by year over all existing data in the metadata dataframe:
+        for year in meta_df['date'].dt.year.unique():
+            year_df_subset = meta_df[meta_df['date'].dt.year == year]
+
+            # Iterate by each week over all existing data in the year:
+            for week in year_df_subset['yr_week_grp_idx'].unique():
+                week_df_subset = year_df_subset[year_df_subset['yr_week_grp_idx'] == week]
+
+                # Iterate by day over all data within the week:
+                for day in week_df_subset['date'].dt.day_of_year.unique():
+                    day_df_subset = week_df_subset[week_df_subset['date'].dt.day_of_year == day]
+                    # Each day will be sharded:
+                    day_shards = shard_day(day_df=day_df_subset, max_num_samples_per_shard=max_num_samples_per_shard, dataset_split=dataset_split, shard_index=shard_index)
+                    # Iterate over every audio sample's metadata for the current day:
+                    # Accumulate a counter of the size in bytes for the day's worth of audio spectra:
+                    # day_spectra_size_in_bytes: int = 0
+                    # while day_spectra_size_in_bytes <
+                    # audio_file_path = day_df_subset['file_path']
+                    # Read in the audio at the specified file path while re-sampling it at the specified rate:
+                    # audio, sample_rate = librosa.load(audio_file_path, sr=self.sample_rate)
+                    # Apply the Fourier transform:
+                    # freqs, time_segs, spectrogram = self.preprocess_audio_sample(audio_sample=audio)
+
+
+    def _compute_maximum_num_samples_per_tf_record(self, spectrogram: np.ndarray, iso_8601: str):
+        """
+        _compute_maximum_num_samples_per_tf_record: Determines how many spectrograms (of the provided dimensions and
+         datatype) will fit into a single TFRecord shard to stay within the 100 MB to 200 MB limit that is recommended
+         by the TensorFlow documentation (see: https://www.tensorflow.org/tutorials/load_data/tfrecord).
+        :param spectrogram: <np.ndarray> The input spectrogram (presumably produced by scipy.signal.spectrogram) whose
+         dimensionality and datatype should be used to calculate the maximum number of samples with the same size and
+         data type that will be able to be stored in TFRecord format.
+        :return max_num_samples_per_tf_record: <int> The maximum number of spectra which will fit in a single TFRecord
+         shard to stay withing the recommended limit.
+        """
+        max_num_samples_per_tf_record: int
+        # TFRecord files only support 1D data, so we must first convert the 2D np.ndarray spectrogram to a Tensor:
+        spectrogram_tensor: tf.Tensor = tf.convert_to_tensor(spectrogram)
+        # Then we must serialize the Tensor to a byte string:
+        spectrogram_byte_str: tf.Tensor = tf.io.serialize_tensor(spectrogram_tensor)
+        # Convert the byte string via _bytes_feature():
+        spectrogram_bytes_list: tf.train.BytesList = _bytes_feature(spectrogram_byte_str)
+        # Convert the associated iso_8601 string to a tf.train.BytesList object:
+        iso_8601_bytes_list: tf.train.BytesList = _bytes_feature(iso_8601.encode('utf-8'))
+        # Now we can construct the tf.train.Example object with these two features:
+        tf_example: tf.train.Example = tf.train.Example(features=tf.train.Features(feature={
+            'audio_bin_str': spectrogram_bytes_list,
+            'iso_8601_bin_str': iso_8601_bytes_list
+        }))
+        # We can now serialize the example:
+        serialized_example: bytes = tf_example.SerializeToString()
+        # We could now write out the example:
+        output_tf_record_file_path: str = os.path.join(self.output_data_dir, 'example.tfrecord')
+        tf_record_writer = tf.io.TFRecordWriter(output_tf_record_file_path)
+        tf_record_writer.write(serialized_example)
+        tf_record_writer.close()
+        # Now we can find out the size in bytes of an individual tf_example object:
+        num_bytes_per_megabyte: float = 1E+6
+        max_tf_record_shard_size_in_bytes: float = (MAXIMUM_SHARD_SIZE * num_bytes_per_megabyte)
+        max_num_examples_per_tf_record = math.ceil(max_tf_record_shard_size_in_bytes / len(serialized_example))
+        print('break')
+        # We can read in the serialized representation with:
+        example_proto = tf.train.Example.FromString(serialized_example)
+        audio_bin_str_bytes_list = example_proto.features.feature['audio_bin_str'].bytes_list
+        decoded_audio_bin_bytes_list = tf.io.decode_proto(audio_bin_str_bytes_list, message_type='BytesList', field_names=['audio_bin_str'], output_types=[tf.float32])
+
+        # We can now read back in the source file:
+
+        # Mathematical approach below does not take into account the TFRecord tf.train.Example object serialization:
+        # memory_size_in_bytes_of_single_element: float = spectrogram.itemsize
+        # num_elements: int = spectrogram.size
+        # num_bytes_per_megabyte: float = 1E+6
+        # # num_bytes_per_mebibyte = 1024 ** 2
+        # max_tf_record_shard_size_in_bytes: float = (MAXIMUM_SHARD_SIZE * num_bytes_per_megabyte)
+        # sample_size_in_bytes: float = memory_size_in_bytes_of_single_element * num_elements
+        # max_num_samples_per_tf_record = math.ceil(
+        #     max_tf_record_shard_size_in_bytes / sample_size_in_bytes
+        # )
+        return max_num_samples_per_tf_record
 
     def _create_beemon_metadata_df(self) -> pd.DataFrame:
         """
@@ -188,7 +337,7 @@ class ConvertWAVToTFRecord:
         df = df.sort_values(by="date")
         # Split the date into multiple columns for ease of access:
         df['year'] = df['date'].dt.year
-        df['week'] = df['date'].dt.week
+        df['week'] = df['date'].dt.isocalendar().week
         df['day_of_year'] = df['date'].dt.day
         df['day_of_week'] = df['date'].dt.dayofweek
         '''
@@ -291,8 +440,60 @@ class ConvertWAVToTFRecord:
             train_df, val_df, test_df = perform_weekly_train_val_test_split(
                 week_data=week_data_subset, train_df=train_df, val_df=val_df, test_df=test_df
             )
+        # Attach the yr_week_grp_index for unique week iteration:
+        train_df['yr_week_grp_idx'] = train_df['date'].apply(
+            lambda x: '%s-%s' % (x.year, '{:02d}'.format(x.week))
+        )
+        val_df['yr_week_grp_idx'] = val_df['date'].apply(
+            lambda x: '%s-%s' % (x.year, '{:02d}'.format(x.week))
+        )
+        test_df['yr_week_grp_idx'] = test_df['date'].apply(
+            lambda x: '%s-%s' % (x.year, '{:02d}'.format(x.week))
+        )
         # Return each unique dataframe:
         return train_df, val_df, test_df
+
+    def preprocess_audio_sample(self, audio_sample: np.ndarray):
+        # TODO: Docstrings.
+        ''' Apply the Fourier transform: '''
+        # Determine the closest power of two to the provided audio sample rate:
+        closest_power_of_two_to_provided_sample_rate: int = math.ceil(np.log2(self.sample_rate))
+        # The nperseg argument of the Fourier transform is constrained to be a power of two, choose the closest
+        # to the audio sample rate for increased accuracy:
+        num_per_segment: int = 2 ** closest_power_of_two_to_provided_sample_rate
+        # Use the default number of points to overlap (Tukey window) as:
+        # num_points_to_overlap: int = num_per_segment // 8
+        freqs, time_segs, spectrogram = signal.spectrogram(audio_sample, nperseg=num_per_segment)
+        return freqs, time_segs, spectrogram
+
+    def preprocess_audio_data(self, metadata_df: pd.DataFrame):
+        """
+        preprocess_audio_data: Receives a metadata dataframe of either training, testing, or validation data and
+         preprocesses the associated audio samples (sequentially) one day at a time.
+        :param metadata_df:
+        :return:
+        """
+        # Group the dataframe by the ordinal day of the year:
+        df_grouped_by_day = metadata_df.groupby(metadata_df['date'].dt.dayofyear)
+        # Iterate over each day of the year, taking all audio files and preprocessing them into spectra:
+        for ordinal_day_of_year, day_of_year_subset in df_grouped_by_day:
+            # We will concatenate the spectrogram of every sample in the current day and store it here:
+            day_of_year_samples_spectra: np.ndarray = np.ndarray(shape=())
+            # Iterate over each sample in the current ordinal day of the year:
+            for i, row in day_of_year_subset.iterrows():
+                audio_file_path: str = row['file_path']
+                # Read in the audio at the specified file path while re-sampling it at the specified rate:
+                audio, sample_rate = librosa.load(audio_file_path, sr=self.sample_rate)
+                ''' Apply the Fourier transform: '''
+                freqs, time_segs, spectrogram = self.preprocess_audio_sample(audio_sample=audio)
+                # Compute the length of each time segment:
+                time_segment_duration: float = time_segs[1] - time_segs[0]
+                # TODO: Offset the time mentioned in datetime object by the first segment time?
+                # TODO: Somehow encode the time information alongside the
+
+            print('break')
+
+
 
     def _determine_shard_size(self):
         """
