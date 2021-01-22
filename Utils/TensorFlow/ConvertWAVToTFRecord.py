@@ -169,6 +169,53 @@ class ConvertWAVToTFRecord:
         # self._num_val_shards: int = self._determine_total_number_of_shards(num_samples=self.num_val_samples)
         # self._num_test_shards: int = self._determine_total_number_of_shards(num_samples=self._num_test_samples)
 
+    @staticmethod
+    def convert_sample_to_tf_example(spectrogram: np.ndarray, iso_8601: str) -> tf.train.Example:
+        """
+        convert_sample_to_tf_example: Takes the native data format of a single sample in the dataset and performs the
+         conversion of the audio spectrogram and associated ISO 8601 string to a tf.train.Example item which can then
+         be further serialized and written (in batch) to a TFRecord file downstream.
+        :param spectrogram: <np.ndarray> A 2D numpy array representing the spectrogram of a single audio file sample.
+        :param iso_8601: <str> The ISO 8601 datetime string produced by parsing the name of the audio file, which was
+         used to generate the spectrogram supplied in conjunction to this method.
+        :source: https://www.kaggle.com/ryanholbrook/tfrecords-basics#tf.Example
+        :return:
+        """
+        tf_example: tf.train.Example
+        # TFRecord files only support 1D data, so we must first convert the spectrogram 2D np.ndarray to a Tensor:
+        spectrogram_tensor: tf.Tensor = tf.convert_to_tensor(spectrogram)
+        # Then we must serialize the Tensor:
+        spectrogram_serialized_tensor: tf.Tensor = tf.io.serialize_tensor(spectrogram_tensor)
+        # And retrieve the Byte String via the numpy method:
+        spectrogram_bytes_list: tf.train.BytesList = spectrogram_serialized_tensor.numpy()
+
+        # Convert the ISO 8601 string to a Tensor:
+        iso_tensor: tf.Tensor = tf.convert_to_tensor(iso_8601)
+        # Serialize the Tensor:
+        iso_8601_serialized_tensor: tf.Tensor = tf.io.serialize_tensor(iso_tensor)
+        # Retrieve the Byte String via the numpy method:
+        iso_8601_bytes_list: tf.train.BytesList = iso_8601_serialized_tensor.numpy()
+
+        # Now wrap the BytesLists in Feature objects:
+        spectrogram_feature = tf.train.Feature(
+            bytes_list=tf.train.BytesList(value=[
+                spectrogram_bytes_list
+            ])
+        )
+        iso_8601_feature = tf.train.Feature(
+            bytes_list=tf.train.BytesList(value=[
+                iso_8601_bytes_list
+            ])
+        )
+        # Create the Features dictionary:
+        features = tf.train.Features(feature={
+            'spectrogram': spectrogram_feature,
+            'iso_8601': iso_8601_feature
+        })
+        # Finally, wrap the features dictionary with a tensorflow example:
+        tf_example = tf.train.Example(features=features)
+        return tf_example
+
     def shard_dataset(self, meta_df: pd.DataFrame, max_num_samples_per_shard: int, dataset_split: DatasetSplitType):
         """
         shard_dataset: Breaks the provided pandas DataFrame into shards (constrained by the maximum number of samples
@@ -202,7 +249,7 @@ class ConvertWAVToTFRecord:
                 iso_8601_bytes_list: tf.train.BytesList = _bytes_feature(sample['iso_8601'])
                 tf_example: tf.train.Example = tf.train.Example(features=tf.train.Features(feature={
                     'audio_byte_str': spectrogram_byte_string,
-                    'iso_8601_bytes_list': iso_8601_bytes_list
+                    'iso_8601_bytes_list': iso_8601_bytes_list.SerializeToString()
                 }))
                 # Construct a file path for the shard of the form 'train-001-180.tfrec':
                 shard_file_path = os.path.join(self._output_data_dir, '{}-{:03d}-{}.tfrec'.format(
@@ -253,26 +300,65 @@ class ConvertWAVToTFRecord:
          shard to stay withing the recommended limit.
         """
         max_num_samples_per_tf_record: int
-        # TFRecord files only support 1D data, so we must first convert the 2D np.ndarray spectrogram to a Tensor:
+
+        # Convert the sample into a tf.train.Example:
+        tf_example: tf.train.Example = self.convert_sample_to_tf_example(spectrogram=spectrogram, iso_8601=iso_8601)
+
+
+
+        # TFRecord files only support 1D data, so we must first convert the spectrogram 2D np.ndarray to a Tensor:
         spectrogram_tensor: tf.Tensor = tf.convert_to_tensor(spectrogram)
-        # Then we must serialize the Tensor to a byte string:
-        spectrogram_byte_str: tf.Tensor = tf.io.serialize_tensor(spectrogram_tensor)
-        # Convert the byte string via _bytes_feature():
-        spectrogram_bytes_list: tf.train.BytesList = _bytes_feature(spectrogram_byte_str)
-        # Convert the associated iso_8601 string to a tf.train.BytesList object:
-        iso_8601_bytes_list: tf.train.BytesList = _bytes_feature(iso_8601.encode('utf-8'))
-        # Now we can construct the tf.train.Example object with these two features:
-        tf_example: tf.train.Example = tf.train.Example(features=tf.train.Features(feature={
-            'audio_bin_str': spectrogram_bytes_list,
-            'iso_8601_bin_str': iso_8601_bytes_list
-        }))
+        # Then we must serialize the Tensor:
+        spectrogram_serialized_tensor: tf.Tensor = tf.io.serialize_tensor(spectrogram_tensor)
+        # And retrieve the Byte String via the numpy method:
+        spectrogram_bytes_list: tf.train.BytesList = spectrogram_serialized_tensor.numpy()
+
+        # Convert the ISO 8601 string to a Tensor:
+        iso_tensor: tf.Tensor = tf.convert_to_tensor(iso_8601)
+        # Serialize the Tensor:
+        iso_8601_serialized_tensor: tf.Tensor = tf.io.serialize_tensor(iso_tensor)
+        # Retrieve the Byte String via the numpy method:
+        iso_8601_bytes_list: tf.train.BytesList = iso_8601_serialized_tensor.numpy()
+
+        # Now wrap the BytesLists in Feature objects:
+        spectrogram_feature = tf.train.Feature(
+            bytes_list=tf.train.BytesList(value=[
+                spectrogram_bytes_list
+            ])
+        )
+        iso_8601_feature = tf.train.Feature(
+            bytes_list=tf.train.BytesList(value=[
+                iso_8601_bytes_list
+            ])
+        )
+        # Create the Features dictionary:
+        features = tf.train.Features(feature={
+            'spectrogram': spectrogram_feature,
+            'iso_8601': iso_8601_feature
+        })
+        # Wrap the features dictionary with a tensorflow Example:
+        example = tf.train.Example(features=features)
         # We can now serialize the example:
-        serialized_example: bytes = tf_example.SerializeToString()
-        # We could now write out the example:
+        serialized_example: bytes = example.SerializeToString()
+        # We could now write out the example as a TFRecord binary protobuffer:
         output_tf_record_file_path: str = os.path.join(self.output_data_dir, 'example.tfrecord')
         tf_record_writer = tf.io.TFRecordWriter(output_tf_record_file_path)
         tf_record_writer.write(serialized_example)
         tf_record_writer.close()
+
+        # We can now read in the serialized representation with:
+        feature_description = {
+            'spectrogram': tf.io.FixedLenFeature([], tf.string),    # The Tensor is a serialized ByteString
+            'iso_8601': tf.io.FixedLenFeature([], tf.string)
+        }
+        read_example = tf.io.parse_single_example(serialized=serialized_example, features=feature_description)
+        iso_8601_bytes_list_tensor: tf.Tensor = read_example['iso_8601']
+        iso_8601_tensor: tf.Tensor = tf.io.parse_tensor(serialized=iso_8601_bytes_list_tensor, out_type=tf.string)
+        iso_8601: str = iso_8601_tensor.numpy().decode('utf-8')
+        spectrogram_bytes_list_tensor: tf.Tensor = read_example['spectrogram']
+        spectrogram_tensor: tf.Tensor = tf.io.parse_tensor(serialized=spectrogram_bytes_list_tensor, out_type=tf.float32)
+
+
         # Now we can find out the size in bytes of an individual tf_example object:
         num_bytes_per_megabyte: float = 1E+6
         max_tf_record_shard_size_in_bytes: float = (MAXIMUM_SHARD_SIZE * num_bytes_per_megabyte)
@@ -281,6 +367,8 @@ class ConvertWAVToTFRecord:
         # We can read in the serialized representation with:
         example_proto = tf.train.Example.FromString(serialized_example)
         audio_bin_str_bytes_list = example_proto.features.feature['audio_bin_str'].bytes_list
+        # Failed attempts at parsing the serialized ByteList protobuffer:
+        decoded_audio_tensor = tf.train.Feature.FromString(example_proto.features.feature['audio_bin_str'].bytes_list)
         decoded_audio_bin_bytes_list = tf.io.decode_proto(audio_bin_str_bytes_list, message_type='BytesList', field_names=['audio_bin_str'], output_types=[tf.float32])
 
         # We can now read back in the source file:
