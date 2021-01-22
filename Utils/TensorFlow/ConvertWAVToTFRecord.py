@@ -32,6 +32,7 @@ def _bytes_feature(value):
         value = value.numpy() # BytesList won't unpack a string from an EagerTensor.
     return tf.train.Feature(bytes_list=tf.train.BytesList(value=[value]))
 
+
 def _tf_float_feature(floats: List[Union[float, np.double]]):
     # The following functions can be used to convert a value to a type compatible
     # with tf.train.Example.
@@ -39,12 +40,14 @@ def _tf_float_feature(floats: List[Union[float, np.double]]):
     # see: https://www.tensorflow.org/tutorials/load_data/tfrecord#tftrainexample
     return tf.train.Feature(float_list=tf.train.FloatList(value=floats))
 
+
 def _int64_feature(value):
     # The following functions can be used to convert a value to a type compatible
     # with tf.train.Example.
     """Returns an int64_list from a bool / enum / int / uint."""
     # see: https://www.tensorflow.org/tutorials/load_data/tfrecord#tftrainexample
     return tf.train.Feature(int64_list=tf.train.Int64List(value=[value]))
+
 
 def _parallelize(func, data):
     """
@@ -118,7 +121,7 @@ class ConvertWAVToTFRecord:
         sample_iso_8601: str = sample['iso_8601']
         # Read in the audio at the specified file path while re-sampling it at the specified rate:
         audio, sample_rate = librosa.load(audio_file_path, sr=self.sample_rate)
-        freqs, time_segs, spectrogram = self.preprocess_audio_sample(audio_sample=audio)
+        freqs, time_segs, spectrogram = self.apply_fourier_transform(audio_sample=audio)
         # Now we can compute how many samples will fit within an individual TFRecord:
         num_samples_per_tf_record_file: int = self._compute_maximum_num_samples_per_tf_record(
             spectrogram=spectrogram,
@@ -130,10 +133,6 @@ class ConvertWAVToTFRecord:
             max_num_samples_per_shard=num_samples_per_tf_record_file,
             dataset_split=DatasetSplitType.TRAIN
         )
-        # TODO: Iterate over each day in each dataframe (sequentially) and perform pre-processing on each day's worth
-        #  of audio files:
-        # _ = self.preprocess_audio_data(metadata_df=train_df)
-
         # TODO: For each day, concatenate the produced spectrograms together, and determine how many TFRecord files will
         #  be required to store each day's worth of data.
         # TODO: Shuffle the concatenated spectrogram for each day, and then write each day to TFRecord files. Keep the
@@ -179,7 +178,8 @@ class ConvertWAVToTFRecord:
         :param iso_8601: <str> The ISO 8601 datetime string produced by parsing the name of the audio file, which was
          used to generate the spectrogram supplied in conjunction to this method.
         :source: https://www.kaggle.com/ryanholbrook/tfrecords-basics#tf.Example
-        :return:
+        :return tf_example: <tf.train.Example> The original sample encoded as a tf.train.Example object compatible with
+         TFRecord files.
         """
         tf_example: tf.train.Example
         # TFRecord files only support 1D data, so we must first convert the spectrogram 2D np.ndarray to a Tensor:
@@ -216,13 +216,53 @@ class ConvertWAVToTFRecord:
         tf_example = tf.train.Example(features=features)
         return tf_example
 
+    @staticmethod
+    def decode_single_tf_example(serialized_example: bytes) -> Tuple[tf.Tensor, tf.Tensor]:
+        """
+        decode_single_tf_example: Takes a serialized tf.train.Example object (in bytes) and converts it back to Tensors
+         containing: a spectrogram 2D array, and an ISO 8601 (datetime string) which corresponds to the audio file that
+         produced the spectrogram.
+        :param serialized_example: <bytes> The serialized tf.train.Example object containing further individually
+         serialized features representing the spectrogram and ISO 8601 datetime strings.
+        :returns spectrogram_tensor, iso_8601_tensor:
+        :return spectrogram: <tf.Tensor> A tensor containing the 2D array of tf.float32 objects representing the audio
+         spectrogram of the source dataset.
+        :return iso_8601_tensor: <tf.Tensor> A 1-D tensor containing the tf.string object of the ISO 8601 datetime
+         string corresponding to the datetime of the audio file that generated the associated spectrogram.
+        """
+        # We can now read in the serialized representation with:
+        feature_description = {
+            'spectrogram': tf.io.FixedLenFeature([], tf.string),  # The 2D source Tensor is a serialized ByteString
+            'iso_8601': tf.io.FixedLenFeature([], tf.string)
+        }
+        read_example = tf.io.parse_single_example(
+            serialized=serialized_example,
+            features=feature_description
+        )
+        iso_8601_bytes_list_tensor: tf.Tensor = read_example['iso_8601']
+        iso_8601_tensor: tf.Tensor = tf.io.parse_tensor(
+            serialized=iso_8601_bytes_list_tensor,
+            out_type=tf.string
+        )
+        # iso_8601: str = iso_8601_tensor.numpy().decode('utf-8')
+        spectrogram_bytes_list_tensor: tf.Tensor = read_example['spectrogram']
+        spectrogram_tensor: tf.Tensor = tf.io.parse_tensor(
+            serialized=spectrogram_bytes_list_tensor, out_type=tf.float32
+        )
+        return spectrogram_tensor, iso_8601_tensor
+
     def shard_dataset(self, meta_df: pd.DataFrame, max_num_samples_per_shard: int, dataset_split: DatasetSplitType):
         """
         shard_dataset: Breaks the provided pandas DataFrame into shards (constrained by the maximum number of samples
          per shard).
-        :param df:
-        :param max_num_samples_per_shard:
-        :param dataset_split:
+        :param meta_df: <pd.DataFrame> The pandas DataFrame containing the metadata for all audio files in the dataset.
+         Each record in the dataset will contain the path to an audio file, the ISO 8601 datetime corresponding to the
+         audio file name, and additional datetime convenience fields (such as year, day, week).
+        :param max_num_samples_per_shard: <int> The maximum number of samples (spectrogram and ISO 8601 pairs) which
+         will fit into a single TFRecord file.
+        :param dataset_split: <DatasetSplitType> An enumerated type indicating if this is the 'train', 'val' or 'test'
+         split/partition of the dataset. This information is used to construct the filename associated with the shard
+         which will later be used when outputting the TFRecord files to disk.
         :return shards: List[Tuple[str, List[str]]]
         """
         shards: List[Tuple[str, List[str]]] = []
@@ -239,18 +279,15 @@ class ConvertWAVToTFRecord:
                 # Read in the audio at the specified file path while re-sampling it at the specified rate:
                 audio, sample_rate = librosa.load(audio_file_path, sr=self.sample_rate)
                 # Apply the Fourier transform:
-                freqs, time_segs, spectrogram = self.preprocess_audio_sample(audio_sample=audio)
+                freqs, time_segs, spectrogram = self.apply_fourier_transform(audio_sample=audio)
                 ''' Construct the tf.train.Example key-value dict: '''
-                # TFRecords only support 1D data, first convert the 2D array to a Tensor:
-                spectrogram_tensor: tf.Tensor = tf.convert_to_tensor(spectrogram)
-                # Then serialize the tensor to a binary string:
-                spectrogram_byte_string = tf.io.serialize_tensor(spectrogram_tensor)
-                # Do the same process with the ISO 8601 date time (convert to a tf.train.BytesList):
-                iso_8601_bytes_list: tf.train.BytesList = _bytes_feature(sample['iso_8601'])
-                tf_example: tf.train.Example = tf.train.Example(features=tf.train.Features(feature={
-                    'audio_byte_str': spectrogram_byte_string,
-                    'iso_8601_bytes_list': iso_8601_bytes_list.SerializeToString()
-                }))
+                # A single day encoded in binary is hopefully small enough to hold in memory long enough to write a
+                # TFRecord file:
+                tf_example: tf.train.Example = self.convert_sample_to_tf_example(
+                    spectrogram=spectrogram,
+                    iso_8601=sample['iso_8601']
+                )
+
                 # Construct a file path for the shard of the form 'train-001-180.tfrec':
                 shard_file_path = os.path.join(self._output_data_dir, '{}-{:03d}-{}.tfrec'.format(
                     dataset_split.value, shard_index, ))
@@ -276,7 +313,12 @@ class ConvertWAVToTFRecord:
                 for day in week_df_subset['date'].dt.day_of_year.unique():
                     day_df_subset = week_df_subset[week_df_subset['date'].dt.day_of_year == day]
                     # Each day will be sharded:
-                    day_shards = shard_day(day_df=day_df_subset, max_num_samples_per_shard=max_num_samples_per_shard, dataset_split=dataset_split, shard_index=shard_index)
+                    day_shards = shard_day(
+                        day_df=day_df_subset,
+                        max_num_samples_per_shard=max_num_samples_per_shard,
+                        dataset_split=dataset_split,
+                        shard_index=shard_index
+                    )
                     # Iterate over every audio sample's metadata for the current day:
                     # Accumulate a counter of the size in bytes for the day's worth of audio spectra:
                     # day_spectra_size_in_bytes: int = 0
@@ -285,10 +327,9 @@ class ConvertWAVToTFRecord:
                     # Read in the audio at the specified file path while re-sampling it at the specified rate:
                     # audio, sample_rate = librosa.load(audio_file_path, sr=self.sample_rate)
                     # Apply the Fourier transform:
-                    # freqs, time_segs, spectrogram = self.preprocess_audio_sample(audio_sample=audio)
+                    # freqs, time_segs, spectrogram = self.apply_fourier_transform(audio_sample=audio)
 
-
-    def _compute_maximum_num_samples_per_tf_record(self, spectrogram: np.ndarray, iso_8601: str):
+    def _compute_maximum_num_samples_per_tf_record(self, spectrogram: np.ndarray, iso_8601: str) -> int:
         """
         _compute_maximum_num_samples_per_tf_record: Determines how many spectrograms (of the provided dimensions and
          datatype) will fit into a single TFRecord shard to stay within the 100 MB to 200 MB limit that is recommended
@@ -296,94 +337,27 @@ class ConvertWAVToTFRecord:
         :param spectrogram: <np.ndarray> The input spectrogram (presumably produced by scipy.signal.spectrogram) whose
          dimensionality and datatype should be used to calculate the maximum number of samples with the same size and
          data type that will be able to be stored in TFRecord format.
-        :return max_num_samples_per_tf_record: <int> The maximum number of spectra which will fit in a single TFRecord
-         shard to stay withing the recommended limit.
+        :return max_num_examples_per_tf_record: <int> The maximum number of spectra (encoded as tf.train.Examples) which
+         will fit in a single TFRecord shard to stay withing the recommended file size limit of a single TFRecord shard.
         """
         max_num_samples_per_tf_record: int
 
         # Convert the sample into a tf.train.Example:
-        tf_example: tf.train.Example = self.convert_sample_to_tf_example(spectrogram=spectrogram, iso_8601=iso_8601)
-
-
-
-        # TFRecord files only support 1D data, so we must first convert the spectrogram 2D np.ndarray to a Tensor:
-        spectrogram_tensor: tf.Tensor = tf.convert_to_tensor(spectrogram)
-        # Then we must serialize the Tensor:
-        spectrogram_serialized_tensor: tf.Tensor = tf.io.serialize_tensor(spectrogram_tensor)
-        # And retrieve the Byte String via the numpy method:
-        spectrogram_bytes_list: tf.train.BytesList = spectrogram_serialized_tensor.numpy()
-
-        # Convert the ISO 8601 string to a Tensor:
-        iso_tensor: tf.Tensor = tf.convert_to_tensor(iso_8601)
-        # Serialize the Tensor:
-        iso_8601_serialized_tensor: tf.Tensor = tf.io.serialize_tensor(iso_tensor)
-        # Retrieve the Byte String via the numpy method:
-        iso_8601_bytes_list: tf.train.BytesList = iso_8601_serialized_tensor.numpy()
-
-        # Now wrap the BytesLists in Feature objects:
-        spectrogram_feature = tf.train.Feature(
-            bytes_list=tf.train.BytesList(value=[
-                spectrogram_bytes_list
-            ])
-        )
-        iso_8601_feature = tf.train.Feature(
-            bytes_list=tf.train.BytesList(value=[
-                iso_8601_bytes_list
-            ])
-        )
-        # Create the Features dictionary:
-        features = tf.train.Features(feature={
-            'spectrogram': spectrogram_feature,
-            'iso_8601': iso_8601_feature
-        })
-        # Wrap the features dictionary with a tensorflow Example:
-        example = tf.train.Example(features=features)
-        # We can now serialize the example:
+        example: tf.train.Example = self.convert_sample_to_tf_example(spectrogram=spectrogram, iso_8601=iso_8601)
+        # Serialize the tf.train.Example to get the number of bytes required to store a single sample in the dataset:
         serialized_example: bytes = example.SerializeToString()
+
         # We could now write out the example as a TFRecord binary protobuffer:
-        output_tf_record_file_path: str = os.path.join(self.output_data_dir, 'example.tfrecord')
-        tf_record_writer = tf.io.TFRecordWriter(output_tf_record_file_path)
-        tf_record_writer.write(serialized_example)
-        tf_record_writer.close()
-
-        # We can now read in the serialized representation with:
-        feature_description = {
-            'spectrogram': tf.io.FixedLenFeature([], tf.string),    # The Tensor is a serialized ByteString
-            'iso_8601': tf.io.FixedLenFeature([], tf.string)
-        }
-        read_example = tf.io.parse_single_example(serialized=serialized_example, features=feature_description)
-        iso_8601_bytes_list_tensor: tf.Tensor = read_example['iso_8601']
-        iso_8601_tensor: tf.Tensor = tf.io.parse_tensor(serialized=iso_8601_bytes_list_tensor, out_type=tf.string)
-        iso_8601: str = iso_8601_tensor.numpy().decode('utf-8')
-        spectrogram_bytes_list_tensor: tf.Tensor = read_example['spectrogram']
-        spectrogram_tensor: tf.Tensor = tf.io.parse_tensor(serialized=spectrogram_bytes_list_tensor, out_type=tf.float32)
-
+        # output_tf_record_file_path: str = os.path.join(self.output_data_dir, 'example.tfrecord')
+        # tf_record_writer = tf.io.TFRecordWriter(output_tf_record_file_path)
+        # tf_record_writer.write(serialized_example)
+        # tf_record_writer.close()
 
         # Now we can find out the size in bytes of an individual tf_example object:
         num_bytes_per_megabyte: float = 1E+6
         max_tf_record_shard_size_in_bytes: float = (MAXIMUM_SHARD_SIZE * num_bytes_per_megabyte)
         max_num_examples_per_tf_record = math.ceil(max_tf_record_shard_size_in_bytes / len(serialized_example))
-        print('break')
-        # We can read in the serialized representation with:
-        example_proto = tf.train.Example.FromString(serialized_example)
-        audio_bin_str_bytes_list = example_proto.features.feature['audio_bin_str'].bytes_list
-        # Failed attempts at parsing the serialized ByteList protobuffer:
-        decoded_audio_tensor = tf.train.Feature.FromString(example_proto.features.feature['audio_bin_str'].bytes_list)
-        decoded_audio_bin_bytes_list = tf.io.decode_proto(audio_bin_str_bytes_list, message_type='BytesList', field_names=['audio_bin_str'], output_types=[tf.float32])
-
-        # We can now read back in the source file:
-
-        # Mathematical approach below does not take into account the TFRecord tf.train.Example object serialization:
-        # memory_size_in_bytes_of_single_element: float = spectrogram.itemsize
-        # num_elements: int = spectrogram.size
-        # num_bytes_per_megabyte: float = 1E+6
-        # # num_bytes_per_mebibyte = 1024 ** 2
-        # max_tf_record_shard_size_in_bytes: float = (MAXIMUM_SHARD_SIZE * num_bytes_per_megabyte)
-        # sample_size_in_bytes: float = memory_size_in_bytes_of_single_element * num_elements
-        # max_num_samples_per_tf_record = math.ceil(
-        #     max_tf_record_shard_size_in_bytes / sample_size_in_bytes
-        # )
-        return max_num_samples_per_tf_record
+        return max_num_examples_per_tf_record
 
     def _create_beemon_metadata_df(self) -> pd.DataFrame:
         """
@@ -541,8 +515,20 @@ class ConvertWAVToTFRecord:
         # Return each unique dataframe:
         return train_df, val_df, test_df
 
-    def preprocess_audio_sample(self, audio_sample: np.ndarray):
-        # TODO: Docstrings.
+    def apply_fourier_transform(self, audio_sample: np.ndarray):
+        """
+        apply_fourier_transform: Takes in a raw audio file (down or up-sampled via the librosa package) and applies
+         consecutive Fourier transforms to produce a spectrogram of the non-stationary signal's frequency content over
+         time. see: https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.spectrogram.html
+        :param audio_sample: <np.ndarray> A 2D numpy array representing the raw audio signal after having been down (or
+         up) sampled via the librosa package during loading from disk.
+        :returns freqs, time_segs, spectrogram:
+        :return freqs: <ndarray> A 1D numpy array of sample frequencies.
+        :return time_segs: <ndarray> A 1D numpy array of segment times corresponding to the array of sample frequencies.
+        :return spectrogram: <ndarray> A 2D numpy array that is the spectrogram of the provided audio sample comprised
+         of the freqs array at the produced time_segs array. By default, the last axis of the spectrogram corresponds to
+         the segment times.
+        """
         ''' Apply the Fourier transform: '''
         # Determine the closest power of two to the provided audio sample rate:
         closest_power_of_two_to_provided_sample_rate: int = math.ceil(np.log2(self.sample_rate))
@@ -558,7 +544,8 @@ class ConvertWAVToTFRecord:
         """
         preprocess_audio_data: Receives a metadata dataframe of either training, testing, or validation data and
          preprocesses the associated audio samples (sequentially) one day at a time.
-        :param metadata_df:
+        :param metadata_df: <pd.DataFrame> The pandas dataframe containing metadata (audio file paths and ISO 8601
+         datetime strings) which
         :return:
         """
         # Group the dataframe by the ordinal day of the year:
@@ -573,53 +560,13 @@ class ConvertWAVToTFRecord:
                 # Read in the audio at the specified file path while re-sampling it at the specified rate:
                 audio, sample_rate = librosa.load(audio_file_path, sr=self.sample_rate)
                 ''' Apply the Fourier transform: '''
-                freqs, time_segs, spectrogram = self.preprocess_audio_sample(audio_sample=audio)
+                freqs, time_segs, spectrogram = self.apply_fourier_transform(audio_sample=audio)
                 # Compute the length of each time segment:
                 time_segment_duration: float = time_segs[1] - time_segs[0]
                 # TODO: Offset the time mentioned in datetime object by the first segment time?
                 # TODO: Somehow encode the time information alongside the
 
             print('break')
-
-
-
-    def _determine_shard_size(self):
-        """
-        _determine_shard_size: Determines how many WAV files (with the given sample-rate and audio duration) will fit
-         into a single TFRecord shard to stay within the 100 MB - 200 MB limit recommended by the TensorFlow
-         documentation (see: https://www.tensorflow.org/tutorials/load_data/tfrecord).
-        Source: https://gist.github.com/dschwertfeger/3288e8e1a2d189e5565cc43bb04169a1
-        :return tf_record_shard_size: <int> The number of samples to contain in a single TFRecord shard.
-        """
-        num_bytes_per_mebibyte = 1024 ** 2
-        maximum_bytes_per_shard = (MAXIMUM_SHARD_SIZE * num_bytes_per_mebibyte)  # 200 MB maximum
-        # TODO: Ask Dr. Parry why the sample rate is multiplied by 2 for 16-bit audio, what is it in our case?
-        audio_bytes_per_second = self.sample_rate * 2  # 16-bit audio
-        audio_bytes_total = audio_bytes_per_second * self.audio_duration
-        tf_record_shard_size = maximum_bytes_per_shard // audio_bytes_total
-        # TODO: Do we want to apply compression to the TFRecord files, will this compression be lossless enough?
-        return tf_record_shard_size
-        #
-        # num_bytes_per_mebibyte = 1024**2
-        # maximum_bytes_per_shard = (MAXIMUM_SHARD_SIZE * num_bytes_per_mebibyte)  # 200 MiB maximum
-        # https://www.cs.princeton.edu/courses/archive/spring07/cos116/labs/COS_116_Lab_4_Solns.pdf (page 9/11):
-        # https://homes.cs.washington.edu/~thickstn/spectrograms.html
-        # We will use scipy.signal.spectrogram, so we will compute the storage requirements in MiB of a single shard...
-        # num_samples_in_audio_signal: int = self.sample_rate * self.audio_duration  # The number of float samples in the audio signal (default: 480,000)
-        # https://www.princeton.edu/~cuff/ele201/files/spectrogram.pdf
-        # https://ocw.mit.edu/courses/mathematics/18-06sc-linear-algebra-fall-2011/positive-definite-matrices-and-applications/complex-matrices-fast-fourier-transform-fft/MIT18_06SCF11_Ses3.2sum.pdf
-        # closest_power_of_two_to_provided_sample_rate: int = math.ceil(np.log2(self.sample_rate))
-        # TODO: Dr. Parry, are the microphones for the beemon data monophonic?
-        # TODO: Dr. Parry, how many bytes per sample per channel?
-        # TODO: Ask Dr. Parry why the sample rate is multiplied by 2 for 16-bit audio, what is it in our case?
-        # audio_bytes_per_second = self.sample_rate * 2   # 16-bit audio
-        # TODO: How many bytes if we decide to encode the spectrogram as a TFRecord and save that?
-        ''' Determine how many bytes it will take to encode the spectrogram: '''
-        # num_samples_in_spectrogram =
-        # audio_bytes_total = audio_bytes_per_second * self.audio_duration
-        # tf_record_shard_size = maximum_bytes_per_shard // audio_bytes_total
-        # TODO: Do we want to apply compression to the TFRecord files, will this compression be lossless enough?
-        # return tf_record_shard_size
 
     def _determine_total_number_of_shards(self, num_samples: int):
         """
