@@ -1,7 +1,7 @@
 import os
 import argparse
-from typing import List, Tuple, Union, Dict
-import glob
+from typing import List, Tuple, Union, Dict, Set
+from pathlib import Path
 import numpy as np
 import math
 import tensorflow as tf
@@ -105,18 +105,22 @@ class ConvertWAVToTFRecord:
         # file names):
         beemon_df: pd.DataFrame = self._create_beemon_metadata_df()
         # Do the train, test, val, split partition of the metadata dataframe (prior to sharding each dataset):
-        train_df, val_df, test_df = self._train_test_val_split(
+        train_indices, val_indices, test_indices = self._train_test_val_split(
             beemon_df=beemon_df
         )
+        # Ensure there are no duplicate indices:
+        assert len(train_indices) == len(set(train_indices))
+        assert len(val_indices) == len(set(val_indices))
+        assert len(test_indices) == len(set(test_indices))
         # Retain summary statistics:
-        self._num_train_samples: int = train_df.shape[0]
-        self._num_val_samples: int = val_df.shape[0]
-        self._num_test_samples: int = test_df.shape[0]
+        self._num_train_samples: int = len(train_indices)
+        self._num_val_samples: int = len(val_indices)
+        self._num_test_samples: int = len(test_indices)
         '''
         Pre-Process a single sample/audio file to determine the shape of the produced spectrogram given the current 
          runtime settings. This information is required to pre-compute the shard size of the resulting TFRecords:
         '''
-        sample = train_df.iloc[0]
+        sample = beemon_df.iloc[0]
         audio_file_path: str = sample['file_path']
         sample_iso_8601: str = sample['iso_8601']
         # Read in the audio at the specified file path while re-sampling it at the specified rate:
@@ -127,12 +131,29 @@ class ConvertWAVToTFRecord:
             spectrogram=spectrogram,
             iso_8601=sample_iso_8601
         )
+
         # Shard the datasets:
-        train_shards: Tuple[str, List[int]] = self.shard_dataset(
-            meta_df=train_df,
+        train_meta_df: pd.DataFrame = beemon_df.iloc[train_indices]
+        train_shards: List[Tuple[str, List[int]]] = self.shard_dataset(
+            meta_df=train_meta_df,
             max_num_samples_per_shard=num_samples_per_tf_record_file,
             dataset_split=DatasetSplitType.TRAIN
         )
+        del train_meta_df
+        val_meta_df: pd.DataFrame = beemon_df.iloc[val_indices]
+        val_shards: List[Tuple[str, List[int]]] = self.shard_dataset(
+            meta_df=val_meta_df,
+            max_num_samples_per_shard=num_samples_per_tf_record_file,
+            dataset_split=DatasetSplitType.VAL
+        )
+        del val_meta_df
+        test_meta_df: pd.DataFrame = beemon_df.iloc[test_indices]
+        test_shards: List[Tuple[str, List[int]]] = self.shard_dataset(
+            meta_df=test_meta_df,
+            max_num_samples_per_shard=num_samples_per_tf_record_file,
+            dataset_split=DatasetSplitType.TEST
+        )
+        del test_meta_df
         # TODO: For each day, concatenate the produced spectrograms together, and determine how many TFRecord files will
         #  be required to store each day's worth of data.
         # TODO: Shuffle the concatenated spectrogram for each day, and then write each day to TFRecord files. Keep the
@@ -251,7 +272,7 @@ class ConvertWAVToTFRecord:
         )
         return spectrogram_tensor, iso_8601_tensor
 
-    def shard_dataset(self, meta_df: pd.DataFrame, max_num_samples_per_shard: int, dataset_split: DatasetSplitType):
+    def shard_dataset(self, meta_df: pd.DataFrame, max_num_samples_per_shard: int, dataset_split: DatasetSplitType) -> List[Tuple[str, List[int]]]:
         """
         shard_dataset: Breaks the provided pandas DataFrame into shards (constrained by the maximum number of samples
          per shard).
@@ -265,69 +286,59 @@ class ConvertWAVToTFRecord:
          which will later be used when outputting the TFRecord files to disk.
         :return shards: List[Tuple[str, List[str]]]
         """
-        shards: List[Tuple[str, List[str]]] = []
-
-        def shard_day(day_df: pd.DataFrame, max_num_samples_per_shard: int, dataset_split: DatasetSplitType, shard_index: int):
-            day_shards: List[Tuple[str, List[str]]] = []
+        shards: List[Tuple[str, List[int]]] = []
+        global_split_shard_index: int = 0   # Global shard index for the dataset split (train, test, or val) dataset.
+        # We want to iterate over each unique day in the dataset:
+        # meta_df_grouped_by_day: pd.DataFrameGroupBy = meta_df.groupby(by='day_of_year', as_index=False)
+        for day_of_year in meta_df['date'].dt.day_of_year.unique():
+            day_df_subset = meta_df[meta_df['date'].dt.day_of_year == day_of_year]
+            ''' shard the entire day: '''
             # Determine how many shards will be needed to store the entire day subset:
-            num_shards_required_for_day: int = math.ceil(day_df.shape[0] / max_num_samples_per_shard)
-            shard_day_offset: int = 0
-            for i in range(max_num_samples_per_shard):
-                day_shard_idx: int = i + shard_day_offset
-                sample = day_df.iloc[day_shard_idx]
-                audio_file_path = sample['file_path']
-                # Read in the audio at the specified file path while re-sampling it at the specified rate:
-                audio, sample_rate = librosa.load(audio_file_path, sr=self.sample_rate)
-                # Apply the Fourier transform:
-                freqs, time_segs, spectrogram = self.apply_fourier_transform(audio_sample=audio)
-                ''' Construct the tf.train.Example key-value dict: '''
-                # A single day encoded in binary is hopefully small enough to hold in memory long enough to write a
-                # TFRecord file:
-                tf_example: tf.train.Example = self.convert_sample_to_tf_example(
-                    spectrogram=spectrogram,
-                    iso_8601=sample['iso_8601']
-                )
+            num_partial_shards_required_for_day: int = math.ceil(day_df_subset.shape[0] / max_num_samples_per_shard)
+            day_requires_multiple_shards: bool
+            if num_partial_shards_required_for_day > 1:
+                day_requires_multiple_shards = True
+                # Preliminary estimates suggest there should never be a day that requires more than two shards to store:
+                assert num_partial_shards_required_for_day <= 2, num_partial_shards_required_for_day
+            else:
+                day_requires_multiple_shards = False
 
-                # Construct a file path for the shard of the form 'train-001-180.tfrec':
-                shard_file_path = os.path.join(self._output_data_dir, '{}-{:03d}-{}.tfrec'.format(
-                    dataset_split.value, shard_index, ))
-
-            # # Iterate over the day's data in the metadata dataframe:
-            # for i, row in day_df.iterrows():
-            #     # Shard the data until we hit the maximum number of samples allocated per shard:
-            #     while i <= max_num_samples_per_shard:
-            #         # Construct a file path for the shard of the form 'train-001-180.tfrec':
-            #         shard_file_path = os.path.join(self._output_data_dir, '{}-{:03d}-{}.tfrec'.format(dataset_split.value, ))
-
-        # Maintain a running counter of the shard index:
-        shard_index: int = 0
-        # Iterate by year over all existing data in the metadata dataframe:
-        for year in meta_df['date'].dt.year.unique():
-            year_df_subset = meta_df[meta_df['date'].dt.year == year]
-
-            # Iterate by each week over all existing data in the year:
-            for week in year_df_subset['yr_week_grp_idx'].unique():
-                week_df_subset = year_df_subset[year_df_subset['yr_week_grp_idx'] == week]
-
-                # Iterate by day over all data within the week:
-                for day in week_df_subset['date'].dt.day_of_year.unique():
-                    day_df_subset = week_df_subset[week_df_subset['date'].dt.day_of_year == day]
-                    # Each day will be sharded:
-                    day_shards = shard_day(
-                        day_df=day_df_subset,
-                        max_num_samples_per_shard=max_num_samples_per_shard,
-                        dataset_split=dataset_split,
-                        shard_index=shard_index
-                    )
-                    # Iterate over every audio sample's metadata for the current day:
-                    # Accumulate a counter of the size in bytes for the day's worth of audio spectra:
-                    # day_spectra_size_in_bytes: int = 0
-                    # while day_spectra_size_in_bytes <
-                    # audio_file_path = day_df_subset['file_path']
-                    # Read in the audio at the specified file path while re-sampling it at the specified rate:
-                    # audio, sample_rate = librosa.load(audio_file_path, sr=self.sample_rate)
-                    # Apply the Fourier transform:
-                    # freqs, time_segs, spectrogram = self.apply_fourier_transform(audio_sample=audio)
+            if not day_requires_multiple_shards:
+                # This day will fit into a single shard.
+                num_samples_in_shard: int = min(max_num_samples_per_shard, day_df_subset.shape[0])
+                shard_indices: np.ndarray = day_df_subset.index.values
+                # Construct a file path for the shard of the form: 'train-001-00-180.tfrec'
+                # This corresponds to: dataset_split-dataset_shard_index-partial_shard_index-num_samples_in_shard.tfrec'
+                shard_file_path: str = os.path.join(self._output_data_dir, '{}-{:03d}-{:02d}-{:03d}'.format(
+                    dataset_split.value, global_split_shard_index, 0, num_samples_in_shard))
+                # Append the file name, and shard indices (for this particular day) to the list of shards:
+                shards.append((shard_file_path, shard_indices))
+                # Update the global shard count for this dataset partition (train, val, test):
+                global_split_shard_index += 1
+            else:
+                # This day will not fit into a single shard.
+                # Keep track of the size of the previous partial shard:
+                num_samples_in_previous_partial_shard: int = 0
+                # Iterate over the number of partial shards required to store the day's subset:
+                for i in range(num_partial_shards_required_for_day):
+                    if i == 0:
+                        num_samples_for_partial_shard: int = math.ceil(max_num_samples_per_shard / 2)
+                        num_samples_in_previous_partial_shard = num_samples_for_partial_shard
+                        # Subset the day's indices by the size of the shard:
+                        shard_indices: List[int] = day_df_subset.index.values[0:num_samples_for_partial_shard]
+                    else:
+                        num_samples_for_partial_shard: int = num_samples_in_previous_partial_shard - math.ceil(max_num_samples_per_shard / 2)
+                        # Subset the day's indices by the size of the shard:
+                        shard_indices: List[int] = day_df_subset.index.values[num_samples_for_partial_shard - 1:]
+                    # Construct a file path for the shard of the form: 'train-001-00-180.tfrec'
+                    # This corresponds to: dataset_split-dataset_shard_index-partial_shard_index-num_samples_in_shard.tfrec'
+                    shard_file_path: str = os.path.join(self._output_data_dir, '{}-{:03d}-{:02d}-{:03d}'.format(
+                        dataset_split.value, global_split_shard_index, i, num_samples_for_partial_shard))
+                    # Append the file name, and sample indices (for this particular day) to the list of shards:
+                    shards.append((shard_file_path, shard_indices))
+                    # Update the global shard count for this dataset partition (train, val, test):
+                    global_split_shard_index += 1
+        return shards
 
     def _compute_maximum_num_samples_per_tf_record(self, spectrogram: np.ndarray, iso_8601: str) -> int:
         """
@@ -400,7 +411,7 @@ class ConvertWAVToTFRecord:
         # Split the date into multiple columns for ease of access:
         df['year'] = df['date'].dt.year
         df['week'] = df['date'].dt.isocalendar().week
-        df['day_of_year'] = df['date'].dt.day
+        df['day_of_year'] = df['date'].dt.day_of_year
         df['day_of_week'] = df['date'].dt.dayofweek
         '''
         Add a grouping index to the dataframe for partitioning on the unique ordinal week value AND a unique month 
@@ -432,22 +443,46 @@ class ConvertWAVToTFRecord:
          ISO 8601 calendar week in the source beemon_df, randomly permuting the days in each week, and selecting a
          subset of those days.
         """
+        # Empty lists to hold the indices in the parent dataframe which will belong to train, val, and test:
+        train_indices: List[int] = []
+        val_indices: List[int] = []
+        test_indices: List[int] = []
         # Empty placeholder dataframes which will contain the records from the partitioned parent dataframe:
-        train_df: pd.DataFrame = pd.DataFrame(
-            data=None,
-            index=None,
-            columns=['file_path', 'rpi', 'iso_8601', 'date', 'year', 'week', 'day_of_year', 'day_of_week']
-        )
-        val_df: pd.DataFrame = pd.DataFrame(
-            data=None,
-            index=None,
-            columns=['file_path', 'rpi', 'iso_8601', 'date', 'year', 'week', 'day_of_year', 'day_of_week']
-        )
-        test_df: pd.DataFrame = pd.DataFrame(
-            data=None,
-            index=None,
-            columns=['file_path', 'rpi', 'iso_8601', 'date', 'year', 'week', 'day_of_year', 'day_of_week']
-        )
+        # train_df: pd.DataFrame = pd.DataFrame(
+        #     data=None,
+        #     index=None,
+        #     columns=['file_path', 'rpi', 'iso_8601', 'date', 'year', 'week', 'day_of_year', 'day_of_week']
+        # )
+        # val_df: pd.DataFrame = pd.DataFrame(
+        #     data=None,
+        #     index=None,
+        #     columns=['file_path', 'rpi', 'iso_8601', 'date', 'year', 'week', 'day_of_year', 'day_of_week']
+        # )
+        # test_df: pd.DataFrame = pd.DataFrame(
+        #     data=None,
+        #     index=None,
+        #     columns=['file_path', 'rpi', 'iso_8601', 'date', 'year', 'week', 'day_of_year', 'day_of_week']
+        # )
+
+        def get_weekly_train_val_test_spit_indices(week_data: pd.DataFrame) -> Tuple[List[int], List[int], List[int]]:
+            global_train_indices: List[int] = []
+            global_val_indices: List[int] = []
+            global_test_indices: List[int] = []
+            # Select a random subset of day-of-the-week indices [0-6] to be training, val, and test data:
+            day_of_week_indices = np.arange(0, 7)
+            # Shuffle the index array:
+            day_of_week_indices = np.random.permutation(day_of_week_indices)
+            train_days = day_of_week_indices[0: 4]
+            val_days = day_of_week_indices[4: 6]
+            test_day = day_of_week_indices[-1]
+            week_train_meta_data_series: pd.Series = week_data.query('day_of_week in @train_days')
+            week_val_meta_data_series: pd.Series = week_data.query('day_of_week in @val_days')
+            week_test_meta_data_series: pd.Series = week_data.query('day_of_week == @test_day')
+            # Append the preserved indices from the groupby to the global list of indices:
+            global_train_indices.extend(week_train_meta_data_series.index)
+            global_val_indices.extend(week_val_meta_data_series.index)
+            global_test_indices.extend(week_test_meta_data_series.index)
+            return global_train_indices, global_val_indices, global_test_indices
 
         def perform_weekly_train_val_test_split(
                 week_data: pd.DataFrame, train_df: pd.DataFrame, val_df: pd.DataFrame, test_df: pd.DataFrame) \
@@ -484,36 +519,48 @@ class ConvertWAVToTFRecord:
             val_days = day_of_week_indices[4: 6]
             test_day = day_of_week_indices[-1]
             week_train_meta_data_series: pd.Series = week_data.query('day_of_week in @train_days')
+            # week_train_meta_data_series['global_index'] = week_train_meta_data_series.index
             week_val_meta_data_series: pd.Series = week_data.query('day_of_week in @val_days')
+            # week_val_meta_data_series['global_index'] = week_val_meta_data_series.index
             week_test_meta_data_series: pd.Series = week_data.query('day_of_week == @test_day')
+            # week_test_meta_data_series['global_index'] = week_test_meta_data_series.index
             # Append each series to their respective train/val/test dataframes:
             train_df = train_df.append(week_train_meta_data_series)
             val_df = val_df.append(week_val_meta_data_series)
             test_df = test_df.append(week_test_meta_data_series)
+            # Maintain the original source dataset indices (for ease of sharding):
+            # train_df['global_index'] = week_train_meta_data_series.index
+            # val_df['global_index'] = week_val_meta_data_series.index
+            # test_df['global_index'] = week_test_meta_data_series.index
             # Return the updated provided dataframes:
             return train_df, val_df, test_df
 
         # Group the dataframe and then iterate over the grouped object:
-        df_grouped_by_week_and_year = beemon_df.groupby('yr_week_grp_idx')
+        df_grouped_by_week_and_year = beemon_df.groupby('yr_week_grp_idx', as_index=False)
 
         # Iterate through the unique weeks in the dataframe:
         for year_and_week, week_data_subset in df_grouped_by_week_and_year:
+            # Update the global list of indices with the computed index subsets:
+            _train_indices, _val_indices, _test_indices = get_weekly_train_val_test_spit_indices(week_data=week_data_subset)
+            train_indices.extend(_train_indices)
+            val_indices.extend(_val_indices)
+            test_indices.extend(_test_indices)
             # Split the week's data into training, validation, and testing days; then update the dataframes:
-            train_df, val_df, test_df = perform_weekly_train_val_test_split(
-                week_data=week_data_subset, train_df=train_df, val_df=val_df, test_df=test_df
-            )
+            # train_df, val_df, test_df = perform_weekly_train_val_test_split(
+            #     week_data=week_data_subset, train_df=train_df, val_df=val_df, test_df=test_df
+            # )
         # Attach the yr_week_grp_index for unique week iteration:
-        train_df['yr_week_grp_idx'] = train_df['date'].apply(
-            lambda x: '%s-%s' % (x.year, '{:02d}'.format(x.week))
-        )
-        val_df['yr_week_grp_idx'] = val_df['date'].apply(
-            lambda x: '%s-%s' % (x.year, '{:02d}'.format(x.week))
-        )
-        test_df['yr_week_grp_idx'] = test_df['date'].apply(
-            lambda x: '%s-%s' % (x.year, '{:02d}'.format(x.week))
-        )
+        # train_df['yr_week_grp_idx'] = train_df['date'].apply(
+        #     lambda x: '%s-%s' % (x.year, '{:02d}'.format(x.week))
+        # )
+        # val_df['yr_week_grp_idx'] = val_df['date'].apply(
+        #     lambda x: '%s-%s' % (x.year, '{:02d}'.format(x.week))
+        # )
+        # test_df['yr_week_grp_idx'] = test_df['date'].apply(
+        #     lambda x: '%s-%s' % (x.year, '{:02d}'.format(x.week))
+        # )
         # Return each unique dataframe:
-        return train_df, val_df, test_df
+        return train_indices, val_indices, test_indices
 
     def apply_fourier_transform(self, audio_sample: np.ndarray):
         """
@@ -740,7 +787,7 @@ class ConvertWAVToTFRecord:
             print('Retrieving a list of all sample audio files in target root_data_dir: \'%s\'' % self.root_data_dir)
         # Assemble list of all audio file paths in the targeted directory:
         all_audio_file_paths: List[str] = []
-        for file in glob.glob('*.wav'):
+        for file in Path('.').rglob('*.wav'):
             all_audio_file_paths.append(os.path.abspath(file))
         # Change back to the original working dir:
         os.chdir(cwd)
