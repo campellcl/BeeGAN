@@ -1,6 +1,6 @@
 import os
 import argparse
-from typing import List, Tuple, Union, Dict, Set
+from typing import List, Tuple, Union, Dict, Set, Optional
 from pathlib import Path
 import numpy as np
 import math
@@ -103,59 +103,36 @@ class ConvertWAVToTFRecord:
         self._num_samples: int = len(self._audio_file_paths)
         # Create a metadata dataframe by augmenting the list of all audio file paths with time information (from the
         # file names):
-        beemon_df: pd.DataFrame = self._create_beemon_metadata_df()
-        # Do the train, test, val, split partition of the metadata dataframe (prior to sharding each dataset):
-        train_indices, val_indices, test_indices = self._train_test_val_split(
-            beemon_df=beemon_df
-        )
-        # Ensure there are no duplicate indices:
-        assert len(train_indices) == len(set(train_indices))
-        assert len(val_indices) == len(set(val_indices))
-        assert len(test_indices) == len(set(test_indices))
-        # Retain summary statistics:
-        self._num_train_samples: int = len(train_indices)
-        self._num_val_samples: int = len(val_indices)
-        self._num_test_samples: int = len(test_indices)
+        self._beemon_df: pd.DataFrame = self._create_beemon_metadata_df()
         '''
         Pre-Process a single sample/audio file to determine the shape of the produced spectrogram given the current 
          runtime settings. This information is required to pre-compute the shard size of the resulting TFRecords:
         '''
-        sample = beemon_df.iloc[0]
+        sample = self._beemon_df.iloc[0]
         audio_file_path: str = sample['file_path']
         sample_iso_8601: str = sample['iso_8601']
         # Read in the audio at the specified file path while re-sampling it at the specified rate:
         audio, sample_rate = librosa.load(audio_file_path, sr=self.sample_rate)
         freqs, time_segs, spectrogram = self.apply_fourier_transform(audio_sample=audio)
+        self._spectrogram_shape = spectrogram.shape
         # Now we can compute how many samples will fit within an individual TFRecord:
-        num_samples_per_tf_record_file: int = self._compute_maximum_num_samples_per_tf_record(
+        self._max_num_samples_per_tf_record_file: int = self._compute_maximum_num_samples_per_tf_record(
             spectrogram=spectrogram,
             iso_8601=sample_iso_8601
         )
+        # These object properties are initially None (on instantiation), but are set automatically during the sharding
+        # process. Perform NoneType checks before utilizing them prior to sharding.
+        self._num_train_samples: Optional[int] = None
+        self._num_val_samples: Optional[int] = None
+        self._num_test_samples: Optional[int] = None
+        self._num_train_shards: Optional[int] = None
+        self._num_val_shards: Optional[int] = None
+        self._num_test_shards: Optional[int] = None
 
-        # Shard the datasets:
-        train_meta_df: pd.DataFrame = beemon_df.iloc[train_indices]
-        train_shards: List[Tuple[str, List[int]]] = self.shard_dataset(
-            meta_df=train_meta_df,
-            max_num_samples_per_shard=num_samples_per_tf_record_file,
-            dataset_split=DatasetSplitType.TRAIN
-        )
-        del train_meta_df
-        val_meta_df: pd.DataFrame = beemon_df.iloc[val_indices]
-        val_shards: List[Tuple[str, List[int]]] = self.shard_dataset(
-            meta_df=val_meta_df,
-            max_num_samples_per_shard=num_samples_per_tf_record_file,
-            dataset_split=DatasetSplitType.VAL
-        )
-        del val_meta_df
-        test_meta_df: pd.DataFrame = beemon_df.iloc[test_indices]
-        test_shards: List[Tuple[str, List[int]]] = self.shard_dataset(
-            meta_df=test_meta_df,
-            max_num_samples_per_shard=num_samples_per_tf_record_file,
-            dataset_split=DatasetSplitType.TEST
-        )
-        del test_meta_df
+
         # TODO: For each day, concatenate the produced spectrograms together, and determine how many TFRecord files will
         #  be required to store each day's worth of data.
+
         # TODO: Shuffle the concatenated spectrogram for each day, and then write each day to TFRecord files. Keep the
         #  train, val, and test TFRecord files separate (either by directory or filename).
         # TODO: Write a TFRecord DataSet reader which reads these TFRecord files and reconstructs a TFDataset object
@@ -272,7 +249,85 @@ class ConvertWAVToTFRecord:
         )
         return spectrogram_tensor, iso_8601_tensor
 
-    def shard_dataset(self, meta_df: pd.DataFrame, max_num_samples_per_shard: int, dataset_split: DatasetSplitType) -> List[Tuple[str, List[int]]]:
+    def shard_datasets(self) -> \
+            Tuple[List[Tuple[str, List[int]]], List[Tuple[str, List[int]]], List[Tuple[str, List[int]]]]:
+        """
+        shard_datasets: Breaks the provided metadata pandas DataFrame into separate shards (for each train, val, and
+         test dataset subset), constrained by the pre-computed maximum number of samples per TFRecord file.
+        :param beemon_df: <pd.DataFrame> The pandas DataFrame containing the metadata for all audio files in the
+         dataset. Each record contains the path to an audio file, the ISO 8601 datetime corresponding to the audio file
+         name, and additional datetime convenience fields (such as year, day, and week).
+        :param max_num_samples_per_tf_record_file: <int> The maximum number of samples (spectrogram and ISO 8601 pairs)
+         which will fit into a single TFRecord file while adhering to the 200 MB recommended file size limitation.
+        :return train_shards, num_train_samples, val_shards, num_val_samples, test_shards, num_test_samples:
+        :return train_shards: <List[Tuple[str, List[int]]]> A list of shard filenames, and the associated indices in the
+         provided beemon_df that should be used to produce the shard.
+        :return num_train_samples: <int> The number of training samples that have been sharded. This corresponds to the
+         summation of the length of every list associated with every shard entry in the train_shards list of tuples.
+        :return val_shards: <List[Tuple[str, List[int]]]> A list of shard filenames, and the associated indices in the
+         provided beemon_df that should be used to produce the shard.
+        :return num_val_samples: <int> The number of validation samples that have been sharded. This corresponds to the
+         summation of the length of every list associated with every shard entry in the val_shards list of tuples.
+        :return test_shards: <List[Tuple[str, List[int]]]> A list of shard filenames, and the associated indices in the
+         provided beemon_df that should be used to produce the shard.
+        :return num_test_samples: <int> The number of testing samples that have been sharded. This corresponds to the
+         summation of the length of every list associated with every shard entry in the test_shards list of tuples.
+        """
+        train_shards: List[Tuple[str, List[int]]] = []
+        num_train_samples: int
+        val_shards: List[Tuple[str, List[int]]] = []
+        num_val_samples: int
+        test_shards: List[Tuple[str, List[int]]] = []
+        num_test_samples: int
+
+        # Do the train, test, val, split partition of the metadata dataframe (prior to sharding each dataset):
+        train_indices, val_indices, test_indices = self._train_test_val_split(
+            beemon_df=self.beemon_df
+        )
+        # Ensure there are no duplicate indices (sanity check):
+        assert len(train_indices) == len(set(train_indices))
+        assert len(val_indices) == len(set(val_indices))
+        assert len(test_indices) == len(set(test_indices))
+
+        # Hold onto the number of samples for later:
+        num_train_samples = len(train_indices)
+        self.num_train_samples = num_train_samples
+        num_val_samples = len(val_indices)
+        self.num_val_samples = num_val_samples
+        num_test_samples = len(test_indices)
+        self.num_test_samples = num_test_samples
+
+        # Shard the datasets:
+        train_meta_df: pd.DataFrame = self.beemon_df.iloc[train_indices]
+        train_shards: List[Tuple[str, List[int]]] = self.shard_dataset(
+            meta_df=train_meta_df,
+            max_num_samples_per_shard=self.max_num_samples_per_tf_record_file,
+            dataset_split=DatasetSplitType.TRAIN
+        )
+        del train_meta_df
+        self.num_train_shards = len(train_shards)
+
+        val_meta_df: pd.DataFrame = self.beemon_df.iloc[val_indices]
+        val_shards: List[Tuple[str, List[int]]] = self.shard_dataset(
+            meta_df=val_meta_df,
+            max_num_samples_per_shard=self.max_num_samples_per_tf_record_file,
+            dataset_split=DatasetSplitType.VAL
+        )
+        del val_meta_df
+        self.num_val_shards = len(val_shards)
+
+        test_meta_df: pd.DataFrame = self.beemon_df.iloc[test_indices]
+        test_shards: List[Tuple[str, List[int]]] = self.shard_dataset(
+            meta_df=test_meta_df,
+            max_num_samples_per_shard=self.max_num_samples_per_tf_record_file,
+            dataset_split=DatasetSplitType.TEST
+        )
+        del test_meta_df
+        self.num_test_shards = len(test_shards)
+        return train_shards, val_shards, test_shards
+
+    def shard_dataset(self, meta_df: pd.DataFrame, max_num_samples_per_shard: int, dataset_split: DatasetSplitType) \
+            -> List[Tuple[str, List[int]]]:
         """
         shard_dataset: Breaks the provided pandas DataFrame into shards (constrained by the maximum number of samples
          per shard).
@@ -284,7 +339,8 @@ class ConvertWAVToTFRecord:
         :param dataset_split: <DatasetSplitType> An enumerated type indicating if this is the 'train', 'val' or 'test'
          split/partition of the dataset. This information is used to construct the filename associated with the shard
          which will later be used when outputting the TFRecord files to disk.
-        :return shards: List[Tuple[str, List[str]]]
+        :return shards: <List[Tuple[str, List[str]]]> A list of shard filenames, and the associated indices in the
+         provided beemon_df that should be used to produce the shard.
         """
         shards: List[Tuple[str, List[int]]] = []
         global_split_shard_index: int = 0   # Global shard index for the dataset split (train, test, or val) dataset.
@@ -696,66 +752,54 @@ class ConvertWAVToTFRecord:
     #     transformed_audio_file: np.ndarray
     #     y, sr = librose
 
-    def _write_tfrecord_file(self, shard_data: Tuple[str, List[str]]):
+    def write_shards_to_output_directory(self, shard_metadata: List[Tuple[str, List[int]]], shuffle_shard_data: bool):
+        # Iterate over the shard file paths, where each shard file path represents either a full day of data (or a half
+        # of a day of data for large days that span multiple shards):
+        for i, (shard_file_path, shard_indices) in enumerate(shard_metadata):
+            if self.is_debug:
+                print('Preprocessing data for shard [{:02d}/{:02d}] \'{}\':'.format(i, len(shard_metadata), shard_file_path))
+            # Create a list to hold the concatenated spectra that will make up a single shard:
+            shard_data: List[tf.train.Example] = []
+            # If the shuffle_shard_data boolean flag is set to true, we want to randomize the data in each shard. This
+            #  corresponds to shuffling the order of the 60 second audio samples (taken every hour) within each day.
+            if shuffle_shard_data:
+                np.random.shuffle(shard_indices)
+            for j, shard_index in enumerate(shard_indices):
+                if self.is_debug:
+                    print('\tPreprocessing sample [{:03d}/{:03d}] for shard {:01d}'.format(j, len(shard_indices), i))
+                sample = self._beemon_df.iloc[shard_index]
+                audio_file_path: str = sample['file_path']
+                sample_iso_8601: str = sample['iso_8601']
+                # Read in the audio at the specified file path while re-sampling it at the specified rate:
+                audio, sample_rate = librosa.load(audio_file_path, sr=self.sample_rate)
+                # Apply the Fourier transform to get the spectrogram
+                freqs, time_segs, spectrogram = self.apply_fourier_transform(audio_sample=audio)
+                # Convert the spectrogram to a tf.train.Example:
+                tf_example = self.convert_sample_to_tf_example(spectrogram=spectrogram, iso_8601=sample_iso_8601)
+                # Append the tf.train.Example to the shard's data for the day:
+                shard_data.append(tf_example)
+            self._write_tfrecord_file(shard_file_path=shard_file_path, shard_data=shard_data)
+        return
+
+    def _write_tfrecord_file(self, shard_file_path: str, shard_data: List[tf.train.Example]):
         """
         _write_tfrecord_file:
         :param shard_data: <Tuple[str, List[str]]> A tuple containing the file path that the TFRecord file should be
          written to, and a list of audio file paths associated with the TFRecord file to be written.
         :return:
         """
-        shard_path, shard_audio_file_paths = shard_data
-        with tf.io.TFRecordWriter(shard_path, options='ZLIB') as writer:
-            for audio_file_path in shard_audio_file_paths:
-                # The spectrogram will be the same dimensionality at
-                # Read in the audio at the specified file path while re-sampling it at the specified rate:
-                audio, sample_rate = librosa.load(audio_file_path, sr=self.sample_rate)
-                ''' Apply the Fourier transform: '''
-                # Determine the closest power of two to the provided audio sample rate:
-                closest_power_of_two_to_provided_sample_rate: int = math.ceil(np.log2(self.sample_rate))
-                # The nperseg argument of the Fourier transform is constrained to be a power of two, choose the closest
-                # to the audio sample rate for increased accuracy:
-                num_per_segment: int = 2 ** closest_power_of_two_to_provided_sample_rate
-                # tf_example = tf.train.Example(features=tf.train.Features(
-                #     feature={
-                #         'ISO_8601': parsed_time_stamp
-                #     }
-                # ))
+        with tf.io.TFRecordWriter(shard_file_path, options='ZLIB') as writer:
+            for tf_example in shard_data:
+                writer.write(tf_example.SerializeToString())
+        return
 
-                ''' Parse the filename into a datetime object '''
-                # TODO: Parse the filename into a datetime object
-
-
-                # We use the default overlap by 1/8th:
-                # num_points_to_overlap: int = num_per_segment // 8
-                # freqs will be the same as long as the sample rate and num per seg is the same.
-                # same thing with the time segments. You could have freq, magnitude, and num seconds since january first 1970 as features (0-23 for the hour of the day, and then the minute and second)
-                freqs, time_segs, spectrogram = signal.spectrogram(audio, nperseg=num_per_segment)
-                # Compute the length of each time segment:
-                time_segment_duration: float = time_segs[1] - time_segs[0]
-                # TODO: Offset the time mentioned in datetime object by the first segment time:
-
-                # TODODOD:
-                # 1. Can we fit an entire day within one TFRecord, play with the parameters a little bit if its close (slightly fewer spectra, use floats instead of doubles)
-                # 2. If we can't fit within one TFRecord, then split it in half. Put half of the records in one file with the same name (date) of the audio file (date part 1 and part 2) Save the best guess as the time that this happened, the 't' variable in the output spectrogram.
-                #   add that in the time that's in the file name and get a different time date stamp for every spectrum. The day of the year, the hour of the day (could be fractional) in two numbers you could capture seasonal and where is the sun roughly.
-                # 3.
-
-                # One sample will NOT correspond to one audio file. Instead we will have multiple spectra per sample
-                ''' Create the TFRecord file: '''
-                # tf_example = tf.train.Example(features=tf.train.Features(
-                #     feature={
-                #         'audio_spectrogram': ???
-                #     }
-                # ))
-
-
-    def perform_conversion(self):
-        # Convert all *.wav files to TFRecords:
-        train_shard_splits = self.split_data_into_shards(
-            dataset_split_type=DatasetSplitType.TRAIN, file_paths=self.train_file_paths
-        )
-        for shard in train_shard_splits:
-            self._write_tfrecord_file(shard_data=shard)
+    # def perform_conversion(self):
+    #     # Convert all *.wav files to TFRecords:
+    #     train_shard_splits = self.split_data_into_shards(
+    #         dataset_split_type=DatasetSplitType.TRAIN, file_paths=self.train_file_paths
+    #     )
+    #     for shard in train_shard_splits:
+    #         self._write_tfrecord_file(shard_data=shard)
 
     def __repr__(self):
         return (
@@ -830,28 +874,60 @@ class ConvertWAVToTFRecord:
         return self._num_samples
 
     @property
-    def num_train_samples(self) -> int:
+    def beemon_df(self) -> pd.DataFrame:
+        return self._beemon_df
+
+    @property
+    def max_num_samples_per_tf_record_file(self) -> int:
+        return self._max_num_samples_per_tf_record_file
+
+    @property
+    def num_train_samples(self) -> Optional[int]:
         return self._num_train_samples
 
-    @property
-    def num_test_samples(self) -> int:
-        return self._num_test_samples
+    @num_train_samples.setter
+    def num_train_samples(self, num_train_samples: int):
+        self._num_train_samples = num_train_samples
 
     @property
-    def num_val_samples(self) -> int:
+    def num_val_samples(self) -> Optional[int]:
         return self._num_val_samples
 
+    @num_val_samples.setter
+    def num_val_samples(self, num_val_samples: int):
+        self._num_val_samples = num_val_samples
+
     @property
-    def num_train_shards(self) -> int:
+    def num_test_samples(self) -> Optional[int]:
+        return self._num_test_samples
+
+    @num_test_samples.setter
+    def num_test_samples(self, num_test_samples: int):
+        self._num_test_samples = num_test_samples
+
+    @property
+    def num_train_shards(self) -> Optional[int]:
         return self._num_train_shards
 
-    @property
-    def num_test_shards(self) -> int:
-        return self._num_test_shards
+    @num_train_shards.setter
+    def num_train_shards(self, num_train_shards: int):
+        self._num_train_shards = num_train_shards
 
     @property
-    def num_val_shards(self) -> int:
+    def num_val_shards(self) -> Optional[int]:
         return self._num_val_shards
+
+    @num_val_shards.setter
+    def num_val_shards(self, num_val_shards: int):
+        self._num_val_shards = num_val_shards
+
+    @property
+    def num_test_shards(self) -> Optional[int]:
+        return self._num_test_shards
+
+    @num_test_shards.setter
+    def num_test_shards(self, num_test_shards: int):
+        self._num_test_shards = num_test_shards
 
 
 def main(args):
@@ -881,7 +957,13 @@ def main(args):
         seed=seed
     )
     print(convert_wav_to_tf_record)
-    convert_wav_to_tf_record.perform_conversion()
+    # Get the (future) shard filenames and the associated indices in the Beemon DataFrame that will be used to produce
+    #  the specified shards, for each dataset split:
+    train_shards, val_shards, test_shards = convert_wav_to_tf_record.shard_datasets()
+    # Write TFRecord shards to the disk:
+    convert_wav_to_tf_record.write_shards_to_output_directory(shard_metadata=train_shards, shuffle_shard_data=True)
+    convert_wav_to_tf_record.write_shards_to_output_directory(shard_metadata=val_shards, shuffle_shard_data=True)
+    convert_wav_to_tf_record.write_shards_to_output_directory(shard_metadata=test_shards, shuffle_shard_data=True)
     exit(0)
 
 
