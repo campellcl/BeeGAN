@@ -753,6 +753,17 @@ class ConvertWAVToTFRecord:
     #     y, sr = librose
 
     def write_shards_to_output_directory(self, shard_metadata: List[Tuple[str, List[int]]], shuffle_shard_data: bool):
+        """
+        write_shards_to_output_directory: Takes in the shard metadata, performs the audio preprocessing steps for each
+         sample associated with the provided shard, and then outputs
+        :param shard_metadata: <List[Tuple[str, List[int]]]> A list of file paths and indices. The file paths correspond
+         to the desired output shard file name. The associated indices correspond to the location in the global metadata
+         dataframe of the audio sample file paths associated with the shard file path.
+        :param shuffle_shard_data: <bool> A boolean flag indicating if the spectra within each shard (with each shard
+         representing a single day's worth of audio data) should be shuffled before being sharded and written to disk.
+        :return None: Upon completion, this method will have preprocessed the spectra associated with the list of shards
+         and sequentially written the sharded data to the output directory specified during initialization.
+        """
         # Iterate over the shard file paths, where each shard file path represents either a full day of data (or a half
         # of a day of data for large days that span multiple shards):
         for i, (shard_file_path, shard_indices) in enumerate(shard_metadata):
