@@ -479,6 +479,25 @@ class ConvertWAVToTFRecord:
         return df
 
     @staticmethod
+    def chunk_array(arr: np.ndarray, chunk_size: int) -> np.ndarray:
+        """
+        chunk_array: Breaks the provided 1D np.ndarray into chunks of the specified size. If the source array is not
+         evenly divisible, the last chunk will be less than the specified chunk size.
+        :param arr: <np.ndarray> The source array to break into chunks of size 'chunk_size'.
+        :param chunk_size: <int> The desired size of the chunks (excluding the last chunk if even division is not
+         possible).
+        :return chunks: <np.ndarray> The 2D array produced by taking the 1D source array and breaking it into chunks.
+        """
+        chunks: np.ndarray
+        length = arr.shape[0]
+        # compute the size of each of the first n-1 chunks:
+        # chunk_size: int = int(np.ceil(length / n))
+        # get the indices at which the chunk splits will occur:
+        chunk_indices = np.arange(chunk_size, length, chunk_size)
+        chunks = np.split(arr, chunk_indices)
+        return chunks
+
+    @staticmethod
     def _train_test_val_split(beemon_df: pd.DataFrame):
         """
         train_test_val_split: Splits the metadata dataframe (containing all audio file paths and associated dates) into
@@ -503,119 +522,71 @@ class ConvertWAVToTFRecord:
         train_indices: List[int] = []
         val_indices: List[int] = []
         test_indices: List[int] = []
-        # Empty placeholder dataframes which will contain the records from the partitioned parent dataframe:
-        # train_df: pd.DataFrame = pd.DataFrame(
-        #     data=None,
-        #     index=None,
-        #     columns=['file_path', 'rpi', 'iso_8601', 'date', 'year', 'week', 'day_of_year', 'day_of_week']
-        # )
-        # val_df: pd.DataFrame = pd.DataFrame(
-        #     data=None,
-        #     index=None,
-        #     columns=['file_path', 'rpi', 'iso_8601', 'date', 'year', 'week', 'day_of_year', 'day_of_week']
-        # )
-        # test_df: pd.DataFrame = pd.DataFrame(
-        #     data=None,
-        #     index=None,
-        #     columns=['file_path', 'rpi', 'iso_8601', 'date', 'year', 'week', 'day_of_year', 'day_of_week']
-        # )
 
-        def get_weekly_train_val_test_spit_indices(week_data: pd.DataFrame) -> Tuple[List[int], List[int], List[int]]:
-            global_train_indices: List[int] = []
-            global_val_indices: List[int] = []
-            global_test_indices: List[int] = []
-            # Select a random subset of day-of-the-week indices [0-6] to be training, val, and test data:
-            day_of_week_indices = np.arange(0, 7)
-            # Shuffle the index array:
-            day_of_week_indices = np.random.permutation(day_of_week_indices)
-            train_days = day_of_week_indices[0: 4]
-            val_days = day_of_week_indices[4: 6]
-            test_day = day_of_week_indices[-1]
-            week_train_meta_data_series: pd.Series = week_data.query('day_of_week in @train_days')
-            week_val_meta_data_series: pd.Series = week_data.query('day_of_week in @val_days')
-            week_test_meta_data_series: pd.Series = week_data.query('day_of_week == @test_day')
-            # Append the preserved indices from the groupby to the global list of indices:
-            global_train_indices.extend(week_train_meta_data_series.index)
-            global_val_indices.extend(week_val_meta_data_series.index)
-            global_test_indices.extend(week_test_meta_data_series.index)
-            return global_train_indices, global_val_indices, global_test_indices
+        # We consider a week to be 5 days:
+        week_duration_in_days: int = 5
 
-        def perform_weekly_train_val_test_split(
-                week_data: pd.DataFrame, train_df: pd.DataFrame, val_df: pd.DataFrame, test_df: pd.DataFrame) \
-                -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-            """
-            perform_weekly_train_val_test_split: This helper method takes in existing (and initially empty) train, val,
-             and test DataFrames, alongside a week's worth of metadata; and then partitions the week's data into the
-             appropriate subset dataframes. Each provided week's worth of data is shuffled randomly (by day) and the
-             days are then split among the training, validation, and testing dataframe subsets.
-            :param week_data: A unique week in the ISO 8601 calendar year. These are the values produced by iterating
-             over the entire source metadata dataframe on week at a time (sequentially) in ascending order.
-            :param train_df: <pd.DataFrame> The existing training dataframe (subset of the parent beemon_df dataframe)
-             which should be extended with the newly partitioned data from the particular calendar week supplied to this
-             method.
-            :param val_df: <pd.DataFrame> The existing validation dataframe (subset of the parent beemon_df dataframe)
-             which should be extended with the newly partitioned data from the particular calendar week supplied to this
-             method.
-            :param test_df: <pd.DataFrame> The existing testing dataframe (subset of the parent beemon_df dataframe)
-             which should be extended with the newly partitioned data from the particular calendar week supplied to this
-             method.
-            :returns train_df, val_df, test_df:
-            :return train_df: <pd.DataFrame> The provided input dataframe concatenated with the training data from the
-             provided week.
-            :return val_df: <pd.DataFrame> The provided input dataframe concatenated with the validation data from the
-             provided week.
-            :return test_df: <pd.DataFrame> The provided input dataframe concatenated with the testing data from the
-             provided week.
-            """
-            # Select a random subset of day-of-the-week indices [0-6] to be training, val, and test data:
-            day_of_week_indices = np.arange(0, 7)
-            # Shuffle the index array:
-            day_of_week_indices = np.random.permutation(day_of_week_indices)
-            train_days = day_of_week_indices[0: 4]
-            val_days = day_of_week_indices[4: 6]
-            test_day = day_of_week_indices[-1]
-            week_train_meta_data_series: pd.Series = week_data.query('day_of_week in @train_days')
-            # week_train_meta_data_series['global_index'] = week_train_meta_data_series.index
-            week_val_meta_data_series: pd.Series = week_data.query('day_of_week in @val_days')
-            # week_val_meta_data_series['global_index'] = week_val_meta_data_series.index
-            week_test_meta_data_series: pd.Series = week_data.query('day_of_week == @test_day')
-            # week_test_meta_data_series['global_index'] = week_test_meta_data_series.index
-            # Append each series to their respective train/val/test dataframes:
-            train_df = train_df.append(week_train_meta_data_series)
-            val_df = val_df.append(week_val_meta_data_series)
-            test_df = test_df.append(week_test_meta_data_series)
-            # Maintain the original source dataset indices (for ease of sharding):
-            # train_df['global_index'] = week_train_meta_data_series.index
-            # val_df['global_index'] = week_val_meta_data_series.index
-            # test_df['global_index'] = week_test_meta_data_series.index
-            # Return the updated provided dataframes:
-            return train_df, val_df, test_df
+        def perform_weekly_train_val_test_split(weekly_day_year_group_indices: np.ndarray):
+            # We want to break the chunk into train, val, and test indices:
 
-        # Group the dataframe and then iterate over the grouped object:
-        df_grouped_by_week_and_year = beemon_df.groupby('yr_week_grp_idx', as_index=False)
+            weekly_train_day_year_group_indices: List[str]
+            weekly_val_day_year_group_indices: List[str]
+            weekly_test_day_year_group_indices: List[str]
 
-        # Iterate through the unique weeks in the dataframe:
-        for year_and_week, week_data_subset in df_grouped_by_week_and_year:
-            # Update the global list of indices with the computed index subsets:
-            _train_indices, _val_indices, _test_indices = get_weekly_train_val_test_spit_indices(week_data=week_data_subset)
-            train_indices.extend(_train_indices)
-            val_indices.extend(_val_indices)
-            test_indices.extend(_test_indices)
-            # Split the week's data into training, validation, and testing days; then update the dataframes:
-            # train_df, val_df, test_df = perform_weekly_train_val_test_split(
-            #     week_data=week_data_subset, train_df=train_df, val_df=val_df, test_df=test_df
-            # )
-        # Attach the yr_week_grp_index for unique week iteration:
-        # train_df['yr_week_grp_idx'] = train_df['date'].apply(
-        #     lambda x: '%s-%s' % (x.year, '{:02d}'.format(x.week))
-        # )
-        # val_df['yr_week_grp_idx'] = val_df['date'].apply(
-        #     lambda x: '%s-%s' % (x.year, '{:02d}'.format(x.week))
-        # )
-        # test_df['yr_week_grp_idx'] = test_df['date'].apply(
-        #     lambda x: '%s-%s' % (x.year, '{:02d}'.format(x.week))
-        # )
-        # Return each unique dataframe:
+            # Select random subset of day-of-the-week indices [0 - 4] to be train, val, and test data:
+            day_of_week_indices: np.ndarray = np.arange(0, 5)
+            day_of_week_indices: np.ndarray = np.random.permutation(day_of_week_indices)
+            week_train_indices = day_of_week_indices[0: 2]  # 3 days for the training dataset
+            week_val_indices = day_of_week_indices[2: 3]  # 1 day for the validation dataset
+            week_test_indices = day_of_week_indices[-1]  # 1 day for the testing dataset
+            # Get the year_week_group_index associated with the indices computed above:
+            weekly_train_day_year_group_indices = weekly_day_year_group_indices[week_train_indices]
+            weekly_val_day_year_group_indices = weekly_day_year_group_indices[week_val_indices]
+            weekly_test_day_year_group_indices = weekly_day_year_group_indices[week_test_indices]
+            return weekly_train_day_year_group_indices, weekly_val_day_year_group_indices, weekly_test_day_year_group_indices
+
+        # Assign an index that is unique for the ordinal day_of_year and the ordinal year value:
+        beemon_df['yr_day_grp_idx'] = beemon_df['date'].apply(
+            lambda x: '%s-%s' % (x.year, '{:03d}'.format(x.day_of_year))
+        )
+
+        # Group the dataframe by day and year:
+        # df_grouped_by_year_and_day = beemon_df.groupby('yr_day_grp_idx', as_index=False)
+
+        # Get the list of unique year and day combinations:
+        unique_year_day_groups = beemon_df.yr_day_grp_idx.unique()
+
+        # Break this list into chunks of x days at a time:
+        chunked_year_day_group_indices: np.ndarray = ConvertWAVToTFRecord.chunk_array(
+            arr=unique_year_day_groups,
+            chunk_size=week_duration_in_days
+        )
+
+        for week_index, week_day_year_group_indices in enumerate(chunked_year_day_group_indices):
+            # For each "week" of the specified size, determine the days which are to belong to the train, val, and test:
+
+            if week_index == len(chunked_year_day_group_indices) - 1:
+                # The last chunk may have a size that is smaller than the other chunks due to uneven division:
+                if len(week_day_year_group_indices) < week_duration_in_days:
+                    # Skip the last chunk if it is not a complete week-sized window.
+                    break
+
+            # Get the days in the dataframe which belong to specified "week" chunk:
+            weekly_train_year_group_indices, weekly_val_year_group_indices, weekly_test_year_group_indices = \
+                perform_weekly_train_val_test_split(
+                    weekly_day_year_group_indices=week_day_year_group_indices
+                )
+            # Get the indices from the dataframe which correspond to the specified day_year_group_indices:
+            week_train_meta_data_subset: pd.DataFrame = \
+                beemon_df.query('yr_day_grp_idx in @weekly_train_year_group_indices')
+            train_indices.extend(week_train_meta_data_subset.index)
+            week_val_meta_data_subset: pd.DataFrame = \
+                beemon_df.query('yr_day_grp_idx in @weekly_val_year_group_indices')
+            val_indices.extend(week_val_meta_data_subset.index)
+            week_test_meta_data_subset: pd.DataFrame = \
+                beemon_df.query('yr_day_grp_idx in @weekly_test_year_group_indices')
+            test_indices.extend(week_test_meta_data_subset.index)
+
         return train_indices, val_indices, test_indices
 
     def apply_fourier_transform(self, audio_sample: np.ndarray):
