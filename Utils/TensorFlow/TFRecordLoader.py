@@ -1,6 +1,6 @@
 import argparse
 import os
-from typing import List, Iterable
+from typing import List, Iterable, Tuple
 from pathlib import Path
 from Utils.EnumeratedTypes.DatasetSplitType import DatasetSplitType
 import tensorflow as tf
@@ -42,56 +42,17 @@ class TFRecordLoader:
         return tf_record_file_paths
 
 
-def _deserialize_tf_record_batch(tf_record_batch: Iterable[tf.train.Example], num_samples_in_batch: int):
+def _deserialize_tf_record(serialized_tf_record: bytes) -> Tuple[tf.Tensor, tf.Tensor]:
     """
-
-    :param tf_record_batch:
-    :param num_samples_in_batch:
-    :return:
-    """
-
-    '''
-    First we have to tell TensorFlow what the format of the encoded data was. As TensorFlow has no way of knowing from
-     the raw serialized byte representation the format of the original tf.train.Example before serialization to binary:
-    '''
-    feature_description = {
-        'spectrogram': tf.io.FixedLenFeature([1], tf.string),    # The (originally 2D source Tensor) is now a serialized ByteString
-        'iso_8601': tf.io.FixedLenFeature([1], tf.string)
-    }
-
-    ''' 
-    Parse the batch of serialized tf.train.Example Tensor (made up of bytes) into their two serialized component Tensors 
-     (one for the ISO_8601 datetime string, and one for the 2D Tensor containing the spectrogram data):
-    '''
-    read_example_batch = tf.io.parse_example(
-        serialized=tf_record_batch,
-        features=feature_description
-    )
-
-    '''
-    The ISO_8601 string was serialized as a list of bytes in order to store it in the TFRecord format. We now need to
-     convert that list of bytes back into a tf.string object for each tf.train.Example Tensor in the batch:
-    '''
-    # TODO: Map this decoding function to the batch of Tensors:
-    # for tensor in read_example_batch:
-    #     iso_8601_bytes_list
-    # for serialized_bytes_list_iso_8601_tensor, serialized_bytes_list_spectrogram_tensor in read_example_batch:
-    #     iso_8601_bytes_list_tensor: tf.Tensor = read_example_batch['iso_8601']
-    #     iso_8601_tensor: tf.Tensor = tf.io.parse_tensor(
-    #         serialized=iso_8601_bytes_list_tensor,
-    #         out_type=tf.string,
-    #         name='iso_8601'
-    #     )
-
-    return read_example_batch['iso_8601'], read_example_batch['spectrogram']
-
-
-def _deserialize_tf_record(serialized_tf_record: bytes, num_samples_per_tf_record: int):
-    """
-    _deserialize_tf_record:
-    :param serialized_tf_record:
-    :param num_samples_per_tf_record:
-    :return:
+    _deserialize_tf_record: Takes in a serialized TFRecord file, and de-serializes the TFRecord into a tf.Tensor. Then
+     this method will de-serialize the ByteList objects to return a tuple containing two Tensors:
+        1. A tf.string Tensor containing the ISO 8601 datetime associated with the sample.
+        2. A tf.float32 2D Tensor containing the spectrogram of the audio sample.
+    :param serialized_tf_record: <bytes> A raw TFRecord file which was previously created by serializing a
+     tf.train.Example.
+    :returns iso_8601_tensor, spectrogram_tensor: <tuple<tf.Tensor, tf.Tensor>> A tuple containing a tf.string Tensor
+     which holds the ISO 8601 datetime representation associated with the audio file, and a tf.float32 tensor which
+     contains the 2D spectrogram associated with the original source audio file.
     """
 
     '''
@@ -167,6 +128,11 @@ def main(args):
     else:
         raise NotImplementedError('The provided dataset split type: \'%s\' was not recognized. Provide a value of: '
                                   '\'train\', \'val\', \'test\', or \'all\'.' % dataset_split_str)
+    if is_debug:
+        # For debugging (see:
+        # https://www.tensorflow.org/guide/effective_tf2#use_tfconfigexperimental_run_functions_eagerly_when_debugging)
+        tf.config.run_functions_eagerly(True)
+
     # tf_record_loader = TFRecordLoader(
     #     root_data_dir=root_data_dir,
     #     dataset_split_type=dataset_split_type,
@@ -181,7 +147,7 @@ def main(args):
     #     num_samples_per_tf_record=num_samples_per_tf_record
     # )
 
-    # use tensorflow to get all relevant tf record files:
+    # Use tensorflow to get all relevant TFRecord file paths:
     file_pattern = os.path.join(root_data_dir, '{}-*.tfrec'.format(dataset_split_type.value))
     file_dataset = tf.data.Dataset.list_files(file_pattern=file_pattern)
 
@@ -197,28 +163,22 @@ def main(args):
         num_parallel_reads=None
     )
 
-    # Prepare the Dataset batches:
+    # De-serialize the dataset of tf.train.Examples into tuple (tf.Tensor(tf.string), tf.Tensor(tf.float32 2D array)):
+    dataset = dataset.map(lambda x: _deserialize_tf_record(serialized_tf_record=x))
+
+    # Split the Dataset into batches for training:
     dataset = dataset.batch(batch_size=dataset_batch_size)
 
-    # For debugging (see https://www.tensorflow.org/guide/effective_tf2#use_tfconfigexperimental_run_functions_eagerly_when_debugging)
-    tf.config.run_functions_eagerly(True)
-
-    # Parse a batch into a dataset of [spectra, label] pairs
-    dataset = dataset.map(lambda x: _deserialize_tf_record_batch(
-        tf_record_batch=x,
-        num_samples_in_batch=num_samples_per_tf_record
-    ))
     # A single item from the dataset is now a batch of tensors (dataset_batch_size x 1):
-    raw_tf_example_batch = next(iter(dataset))
-    # There will be (dataset_batch_size x 1) raw/encoded ISO 8601 tensors in the raw_tf_example_batch[0]:
-    raw_iso_8601_tensor_batch = raw_tf_example_batch[0]
-    # There will be (dataset_batch_size x 1) raw/encoded 2D spectrogram tensors in the raw_tf_example_batch[1]:
-    raw_spectrogram_tensor_batch = raw_tf_example_batch[1]
+    # tf_example_batch = next(iter(dataset))
 
-    # raw_example = next(iter(dataset))
-    print('break')
-    # dataset = dataset.batch(batch_size=dataset_batch_size)
-    # dataset = dataset.map(lambda x: _deserialize_tf_record_batch(x, dataset_batch_size))
+    # There will be (dataset_batch_size x 1) raw/encoded ISO 8601 tensors in the tf_example_batch[0]:
+    # iso_8601_tensor_batch = tf_example_batch[0]
+
+    # There will be (dataset_batch_size x 1) raw/encoded 2D spectrogram tensors in the tf_example_batch[1]:
+    # spectrogram_tensor_batch = tf_example_batch[1]
+
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='TensorFlow TFRecord dataset loader.')
@@ -226,5 +186,7 @@ if __name__ == '__main__':
     parser.add_argument('--root-data-dir', type=str, nargs=1, action='store', dest='root_data_dir', required=True)
     parser.add_argument('--dataset-split', type=str, nargs=1, action='store', dest='dataset_split_str', required=True,
                         help='The dataset split that should be loaded (e.g. train, test, val, or all).')
+    parser.add_argument('--train-batch-size', type=int, action='store', dest='train_batch_size', required=True,
+                        help='The size of the input batches for the neural network during training.')
     command_line_args = parser.parse_args()
     main(args=command_line_args)

@@ -365,7 +365,7 @@ class ConvertWAVToTFRecord:
                 shard_indices: np.ndarray = day_df_subset.index.values
                 # Construct a file path for the shard of the form: 'train-001-00-180.tfrec'
                 # This corresponds to: dataset_split-dataset_shard_index-partial_shard_index-num_samples_in_shard.tfrec'
-                shard_file_path: str = os.path.join(self._output_data_dir, '{}-{:03d}-{:02d}-{:03d}'.format(
+                shard_file_path: str = os.path.join(self._output_data_dir, '{}-{:03d}-{:02d}-{:03d}.tfrec'.format(
                     dataset_split.value, global_split_shard_index, 0, num_samples_in_shard))
                 # Append the file name, and shard indices (for this particular day) to the list of shards:
                 shards.append((shard_file_path, shard_indices))
@@ -388,7 +388,7 @@ class ConvertWAVToTFRecord:
                         shard_indices: List[int] = day_df_subset.index.values[num_samples_for_partial_shard - 1:]
                     # Construct a file path for the shard of the form: 'train-001-00-180.tfrec'
                     # This corresponds to: dataset_split-dataset_shard_index-partial_shard_index-num_samples_in_shard.tfrec'
-                    shard_file_path: str = os.path.join(self._output_data_dir, '{}-{:03d}-{:02d}-{:03d}'.format(
+                    shard_file_path: str = os.path.join(self._output_data_dir, '{}-{:03d}-{:02d}-{:03d}.tfrec'.format(
                         dataset_split.value, global_split_shard_index, i, num_samples_for_partial_shard))
                     # Append the file name, and sample indices (for this particular day) to the list of shards:
                     shards.append((shard_file_path, shard_indices))
@@ -698,9 +698,11 @@ class ConvertWAVToTFRecord:
         elif dataset_split_type == DatasetSplitType.TEST:
             shard_size = math.ceil(self.num_test_samples / self.num_test_shards)
             num_shards = self.num_test_shards
-        else:
+        elif dataset_split_type == DatasetSplitType.VAL:
             shard_size = math.ceil(self.num_val_samples / self.num_val_shards)
             num_shards = self.num_val_shards
+        else:
+            raise NotImplementedError
 
         # Split data into shards:
         for shard_id in range(0, num_shards):
