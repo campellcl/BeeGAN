@@ -133,43 +133,6 @@ class ConvertWAVToTFRecord:
         self._num_val_shards: Optional[int] = None
         self._num_test_shards: Optional[int] = None
 
-
-        # TODO: For each day, concatenate the produced spectrograms together, and determine how many TFRecord files will
-        #  be required to store each day's worth of data.
-
-        # TODO: Shuffle the concatenated spectrogram for each day, and then write each day to TFRecord files. Keep the
-        #  train, val, and test TFRecord files separate (either by directory or filename).
-        # TODO: Write a TFRecord DataSet reader which reads these TFRecord files and reconstructs a TFDataset object
-        #  for each split of the dataset (train, val, test)
-
-        # df_week_start_index_inclusive: int = 0
-        # df_week_end_index_inclusive: int = -1
-        # for dt in rrule.rrule(rrule.WEEKLY, dtstart=df.iloc[0]['date'], until=df.iloc[-1]['date']):
-        #     df_start_index_inclusive: int = df.loc[df['iso_8601'] == dt.isoformat()].index[0]
-
-
-        '''
-        Here we shuffle the ordering of the audio sample files so they don't end up encoded sequentially in the same
-         TFRecord shards. We do this shuffling here (instead of prior to training) because (to my knowledge) there is 
-         no efficient random access to TFRecord objects (see: https://stackoverflow.com/q/35657015/3429090). The 
-         sequential hard drive reads during the retrieval of the TFRecord files are preferred for performance reasons.
-         For this reason TFRecord files can apparently only be read from disk sequentially (see: 
-         https://www.tensorflow.org/tutorials/load_data/tfrecord#tfrecords_format_details)
-        '''
-        # np.random.shuffle(self._audio_file_paths)
-        # self._num_samples: int = len(self._audio_file_paths)
-        # self._num_test_samples: int = math.ceil(self._num_samples * test_size)
-        # self._num_val_samples: int = math.ceil(self._num_samples * val_size)
-        # self._num_train_samples: int = self._num_samples - self._num_test_samples - self._num_val_samples
-        # Split the list of audio file paths into train, test, and val sets:
-        # self.train_file_paths: List[str] = self._audio_file_paths[0: self._num_train_samples]
-        # self.val_file_paths: List[str] = self._audio_file_paths[self._num_train_samples: (self._num_train_samples + self._num_val_samples)]
-        # self.test_file_paths: List[str] = self._audio_file_paths[(self.num_train_samples + self._num_val_samples)::]
-        # Determine the total number of TFRecord shards that will be necessary for each split of the dataset:
-        # self._num_train_shards: int = self._determine_total_number_of_shards(num_samples=self.num_train_samples)
-        # self._num_val_shards: int = self._determine_total_number_of_shards(num_samples=self.num_val_samples)
-        # self._num_test_shards: int = self._determine_total_number_of_shards(num_samples=self._num_test_samples)
-
     @staticmethod
     def convert_sample_to_tf_example(spectrogram: np.ndarray, iso_8601: str) -> tf.train.Example:
         """
@@ -540,8 +503,8 @@ class ConvertWAVToTFRecord:
             # Select random subset of day-of-the-week indices [0 - 4] to be train, val, and test data:
             day_of_week_indices: np.ndarray = np.arange(0, 5)
             day_of_week_indices: np.ndarray = np.random.permutation(day_of_week_indices)
-            week_train_indices = day_of_week_indices[0: 2]  # 3 days for the training dataset
-            week_val_indices = day_of_week_indices[2: 3]  # 1 day for the validation dataset
+            week_train_indices = day_of_week_indices[0: 3]  # 3 days for the training dataset
+            week_val_indices = day_of_week_indices[3: 4]  # 1 day for the validation dataset
             week_test_indices = day_of_week_indices[-1]  # 1 day for the testing dataset
             # Get the year_week_group_index associated with the indices computed above:
             weekly_train_day_year_group_indices = weekly_day_year_group_indices[week_train_indices]
