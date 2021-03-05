@@ -1,4 +1,5 @@
 import os
+import sys
 import argparse
 from typing import List, Tuple, Union, Dict, Set, Optional
 from pathlib import Path
@@ -13,6 +14,7 @@ import datetime
 from dateutil import rrule
 import pandas as pd
 from Utils.EnumeratedTypes.DatasetSplitType import DatasetSplitType
+from Utils.BlacklistedSamples import blacklisted_samples
 
 
 _DEFAULT_AUDIO_DURATION = 60     # seconds
@@ -99,7 +101,9 @@ class ConvertWAVToTFRecord:
         self._is_debug: bool = is_debug
         self._seed: int = seed
         np.random.seed(self._seed)
-        self._audio_file_paths: List[str] = self.get_all_audio_file_paths_in_root_data_dir()
+        self._audio_file_paths: List[str] = self.get_audio_file_paths_in_root_data_dir(
+            blacklisted_filenames=blacklisted_samples
+        )
         self._num_samples: int = len(self._audio_file_paths)
         # Create a metadata dataframe by augmenting the list of all audio file paths with time information (from the
         # file names):
@@ -804,7 +808,7 @@ class ConvertWAVToTFRecord:
                 self.num_val_samples
             ))
 
-    def get_all_audio_file_paths_in_root_data_dir(self) -> List[str]:
+    def get_audio_file_paths_in_root_data_dir(self, blacklisted_filenames: Set) -> List[str]:
         # Get the current working dir:
         cwd = os.getcwd()
         if not os.path.isdir(self.root_data_dir):
@@ -816,7 +820,8 @@ class ConvertWAVToTFRecord:
         # Assemble list of all audio file paths in the targeted directory:
         all_audio_file_paths: List[str] = []
         for file in Path('.').rglob('*.wav'):
-            all_audio_file_paths.append(os.path.abspath(file))
+            if file.name not in blacklisted_filenames:
+                all_audio_file_paths.append(os.path.abspath(file))
         # Change back to the original working dir:
         os.chdir(cwd)
         return all_audio_file_paths
@@ -948,7 +953,7 @@ def main(args):
     convert_wav_to_tf_record.write_shards_to_output_directory(shard_metadata=train_shards, shuffle_shard_data=True)
     convert_wav_to_tf_record.write_shards_to_output_directory(shard_metadata=val_shards, shuffle_shard_data=True)
     convert_wav_to_tf_record.write_shards_to_output_directory(shard_metadata=test_shards, shuffle_shard_data=True)
-    exit(0)
+    sys.exit(0)
 
 
 if __name__ == '__main__':
