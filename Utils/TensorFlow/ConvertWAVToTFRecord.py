@@ -578,48 +578,8 @@ class ConvertWAVToTFRecord:
         num_per_segment: int = 2 ** closest_power_of_two_to_provided_sample_rate
         # Use the default number of points to overlap (Tukey window) as:
         # num_points_to_overlap: int = num_per_segment // 8
-        freqs, time_segs, spectrogram = signal.spectrogram(audio_sample, nperseg=num_per_segment)
+        freqs, time_segs, spectrogram = signal.spectrogram(audio_sample, nperseg=num_per_segment, mode='magnitude')
         return freqs, time_segs, spectrogram
-
-    def preprocess_audio_data(self, metadata_df: pd.DataFrame):
-        """
-        preprocess_audio_data: Receives a metadata dataframe of either training, testing, or validation data and
-         preprocesses the associated audio samples (sequentially) one day at a time.
-        :param metadata_df: <pd.DataFrame> The pandas dataframe containing metadata (audio file paths and ISO 8601
-         datetime strings) which
-        :return:
-        """
-        # Group the dataframe by the ordinal day of the year:
-        df_grouped_by_day = metadata_df.groupby(metadata_df['date'].dt.dayofyear)
-        # Iterate over each day of the year, taking all audio files and preprocessing them into spectra:
-        for ordinal_day_of_year, day_of_year_subset in df_grouped_by_day:
-            # We will concatenate the spectrogram of every sample in the current day and store it here:
-            day_of_year_samples_spectra: np.ndarray = np.ndarray(shape=())
-            # Iterate over each sample in the current ordinal day of the year:
-            for i, row in day_of_year_subset.iterrows():
-                audio_file_path: str = row['file_path']
-                # Read in the audio at the specified file path while re-sampling it at the specified rate:
-                audio, sample_rate = librosa.load(audio_file_path, sr=self.sample_rate)
-                ''' Apply the Fourier transform: '''
-                freqs, time_segs, spectrogram = self.apply_fourier_transform(audio_sample=audio)
-                # Compute the length of each time segment:
-                time_segment_duration: float = time_segs[1] - time_segs[0]
-                # TODO: Offset the time mentioned in datetime object by the first segment time?
-                # TODO: Somehow encode the time information alongside the
-
-            print('break')
-
-    def _determine_total_number_of_shards(self, num_samples: int):
-        """
-        _determine_total_number_of_shards: Compute the total number of TFRecord shards (given the automatically
-         determined ideal shard size and total number of audio samples).
-        Source: https://gist.github.com/dschwertfeger/3288e8e1a2d189e5565cc43bb04169a1
-        :param num_samples: <int> The number of samples (train, val, or test) to determine the total number of TFRecord
-         shards that will be required to store the data.
-        :return num_shards: <int> The number of shards
-        """
-        num_shards: int = math.ceil(num_samples / self._determine_shard_size())
-        return num_shards
 
     def _get_shard_output_file_path(self, dataset_split_type: DatasetSplitType, shard_id: int, shard_size: int):
         """
@@ -640,57 +600,6 @@ class ConvertWAVToTFRecord:
         output_shard_file_path = os.path.join(self.output_data_dir, '{}-{:03d}-{}.tfrec'.format(
             dataset_split_type.value, shard_id, shard_size))
         return output_shard_file_path
-
-    def split_data_into_shards(self, file_paths: List[str], dataset_split_type: DatasetSplitType) \
-            -> List[Tuple[str, List[str]]]:
-        """
-        _split_data_into_shards: Given a list of file paths for a train, test, or validation split of the dataset and
-         the name of the corresponding split (as an enumerated type); this method subsets the provided file paths into
-         discrete shards. The result of this method is a list of tuples containing both: the file path for the shard,
-         and the list of audio file paths associated with the shards file path.
-        :param file_paths: <List[str]> A list of file paths associated with the provided dataset partition/split type.
-        :param dataset_split_type: <DatasetSplitType> An enumerated type representing the partition of the dataset:
-         train, val, or test.
-        :return shards: A list of tuples which contain:
-            a) The desired output file path for the shard (once created)
-            b) A list of audio sample file paths associated with the shard
-        """
-        shards: List[Tuple[str, List[str]]] = []
-        shard_size: int
-        num_shards: int
-
-        if dataset_split_type == DatasetSplitType.TRAIN:
-            shard_size = math.ceil(self.num_train_samples / self.num_train_shards)
-            num_shards = self.num_train_shards
-        elif dataset_split_type == DatasetSplitType.TEST:
-            shard_size = math.ceil(self.num_test_samples / self.num_test_shards)
-            num_shards = self.num_test_shards
-        elif dataset_split_type == DatasetSplitType.VAL:
-            shard_size = math.ceil(self.num_val_samples / self.num_val_shards)
-            num_shards = self.num_val_shards
-        else:
-            raise NotImplementedError
-
-        # Split data into shards:
-        for shard_id in range(0, num_shards):
-            shard_output_file_path = self._get_shard_output_file_path(
-                dataset_split_type=dataset_split_type,
-                shard_id=shard_id,
-                shard_size=shard_size
-            )
-            shard_starting_index = shard_id * (shard_size - 1)
-            shard_ending_index = shard_starting_index + (shard_size - 1)
-            shard_file_path_indices = np.arange(shard_starting_index, shard_ending_index)
-            file_paths_nd_array = np.array(file_paths)
-            # Get a subset of the total train/val/test file paths for the current shard:
-            shard_file_paths_nd_array = file_paths_nd_array[shard_file_path_indices]
-            # Append the shard file path, and the list of associated samples to the shards array:
-            shards.append((shard_output_file_path, list(shard_file_paths_nd_array)))
-        return shards
-
-    # def _load_and_sample_audio_file(self, audio_file_path: str) -> np.ndarray:
-    #     transformed_audio_file: np.ndarray
-    #     y, sr = librose
 
     def write_shards_to_output_directory(self, shard_metadata: List[Tuple[str, List[int]]], shuffle_shard_data: bool):
         """
@@ -744,14 +653,6 @@ class ConvertWAVToTFRecord:
                 writer.write(tf_example.SerializeToString())
         return
 
-    # def perform_conversion(self):
-    #     # Convert all *.wav files to TFRecords:
-    #     train_shard_splits = self.split_data_into_shards(
-    #         dataset_split_type=DatasetSplitType.TRAIN, file_paths=self.train_file_paths
-    #     )
-    #     for shard in train_shard_splits:
-    #         self._write_tfrecord_file(shard_data=shard)
-
     def __repr__(self):
         return (
             '{}.{}(root_data_dir={}, output_data_dir={}, audio_duration={}, sample_rate={}, seed={}, test_size={}, '
@@ -772,6 +673,16 @@ class ConvertWAVToTFRecord:
             ))
 
     def get_audio_file_paths_in_root_data_dir(self, blacklisted_filenames: Set) -> List[str]:
+        """
+        get_audio_file_paths_in_root_data_dir: Performs a recursive search of all subdirectories in the root data
+         directory which was specified during initialization. Any audio files which have been manually blacklisted in
+         `BeeGAN\Utils\BlacklistedSamples.py` are excluded from the global list of audio files.
+        :param blacklisted_filenames: <set> A set of audio file names which have been manually identified as anomalous
+         and are therefore excluded from the set of all samples.
+        :return all_audio_file_paths: <List[str]> A list of the absolute file paths of all audio files in the specified
+         root data directory; excluding those audio files which have been manually blacklisted.
+        """
+        all_audio_file_paths: List[str] = []
         # Get the current working dir:
         cwd = os.getcwd()
         if not os.path.isdir(self.root_data_dir):
@@ -781,7 +692,6 @@ class ConvertWAVToTFRecord:
         if self.is_debug:
             print('Retrieving a list of all sample audio files in target root_data_dir: \'%s\'' % self.root_data_dir)
         # Assemble list of all audio file paths in the targeted directory:
-        all_audio_file_paths: List[str] = []
         for file in Path('.').rglob('*.wav'):
             if file.name not in blacklisted_filenames:
                 all_audio_file_paths.append(os.path.abspath(file))
