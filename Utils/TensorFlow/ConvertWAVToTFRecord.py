@@ -676,7 +676,7 @@ class ConvertWAVToTFRecord:
         """
         get_audio_file_paths_in_root_data_dir: Performs a recursive search of all subdirectories in the root data
          directory which was specified during initialization. Any audio files which have been manually blacklisted in
-         `BeeGAN\Utils\BlacklistedSamples.py` are excluded from the global list of audio files.
+         BeeGAN/Utils/BlacklistedSamples.py are excluded from the global list of audio files.
         :param blacklisted_filenames: <set> A set of audio file names which have been manually identified as anomalous
          and are therefore excluded from the set of all samples.
         :return all_audio_file_paths: <List[str]> A list of the absolute file paths of all audio files in the specified
