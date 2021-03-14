@@ -1,11 +1,42 @@
 import os
 import tensorflow as tf
 from typing import Tuple, Optional
-from tensorflow.keras import initializers, constraints, regularizers, activations
+from tensorflow.keras import initializers, constraints, regularizers, activations, optimizers, losses
 import argparse
 from tensorflow.python.keras.utils import losses_utils
 from Utils.EnumeratedTypes.DatasetSplitType import DatasetSplitType
 from Utils.TensorFlow.TFRecordLoader import TFRecordLoader
+
+# SAMPLE_FREQUENCIES_SHAPE = (-1, 4097, 1)
+
+
+class Autoencoder(tf.keras.Model):
+
+    def __init__(self, encoder: tf.keras.Model, latent: tf.keras.Model, decoder: tf.keras.Model, name: str):
+        super(Autoencoder, self).__init__(name=name)
+        self._encoder = encoder
+        self._encoder_optimizer: Optional[optimizers.Optimizer] = None
+        self._latent = latent
+        self._decoder = decoder
+        self._decoder_optimizer: Optional[optimizers.Optimizer] = None
+        self._loss_function: Optional[losses.Loss] = None
+
+    def compile(self, encoder_optimizer: optimizers.Optimizer, decoder_optimizer: optimizers.Optimizer,
+                loss_function: losses.Loss):
+        super(Autoencoder, self).compile()
+        self._encoder_optimizer = encoder_optimizer
+        self._decoder_optimizer = decoder_optimizer
+        self._loss_function = loss_function
+
+    def call(self, x):
+        encoded = self._encoder(x)
+        decoded = self._decoder(encoded)
+        return decoded
+
+    # def train_step(self, dataset_record):
+    #     if isinstance(dataset_record, tuple):
+    #         sample_frequencies_tensor = dataset_record[0]
+    #         sample_iso_8601 = dataset_record[1]
 
 
 class BottleneckLayer:
@@ -74,7 +105,7 @@ class BottleneckLayer:
         return self._dense_layer
 
 
-def make_autoencoder_model(receptive_field_size: int, bottleneck_layer: BottleneckLayer, batch_size: int):
+def make_sequential_autoencoder_model(receptive_field_size: int, bottleneck_layer: BottleneckLayer, batch_size: int):
     """
     make_autoencoder_model: TODO: Docstrings.
 
@@ -140,28 +171,63 @@ def main(args):
     # There will be (dataset_batch_size x 1) raw/encoded ISO 8601 tensors in the tf_example_batch[0]:
     # iso_8601_tensor_batch = tf_example_batch[0]
 
-    # There will be (dataset_batch_size x 4097 x 66) raw/encoded 2D spectrogram tensors in the tf_example_batch[1]:
+    # There will be (dataset_batch_size x 4097) raw/encoded 2D spectrogram tensors in the tf_example_batch[1]:
     # spectrogram_tensor_batch = tf_example_batch[1]
 
-    # BottleneckLayer the encoding/latent-code of the data (here for the SVD case):
-    bottleneck_layer: BottleneckLayer = BottleneckLayer(
-        num_neurons=4097,
-        activation=tf.keras.activations.linear,
-        kernel_initializer=tf.keras.initializers.TruncatedNormal(mean=0.0, stddev=0.05, seed=None),
-        bias_initializer=tf.keras.initializers.Zeros(),
-        kernel_regularizer=None,
-        bias_regularizer=None,
-        activity_regularizer=None,
-        kernel_constraint=None,
-        bias_constraint=None,
-        name='bottleneck_layer'
-    )
+    # A single sample by default size (4097,) is hence:
+    # sample = spectrogram_tensor_batch[0]
+    # sample_iso_8601_str = iso_8601_tensor_batch[0]
 
-    # Instantiate the model:
-    autoencoder = make_autoencoder_model(
-        receptive_field_size=4097,
-        bottleneck_layer=bottleneck_layer,
-        batch_size=batch_size
+    ''' For the SVD model: '''
+    # Define the encoder:
+    encoder = tf.keras.Sequential(
+        layers=[
+            tf.keras.layers.InputLayer(input_shape=(4097, 1), batch_size=batch_size, name='encoder')
+        ],
+        name='encoder'
+    )
+    # Define the latent dimension:
+    latent = tf.keras.Sequential([
+        tf.keras.layers.Dense(
+            units=1,
+            activation=activations.linear,
+            use_bias=False,
+            kernel_initializer=initializers.RandomNormal(mean=0.0, stddev=1.0, seed=None),
+            bias_initializer=initializers.Zeros(),
+            kernel_regularizer=None,
+            bias_regularizer=None,
+            activity_regularizer=None,
+            kernel_constraint=None,
+            bias_constraint=None,
+            name='latent'
+        )
+    ])
+    # Define the decoder:
+    decoder = tf.keras.Sequential(
+        layers=[
+            tf.keras.layers.Dense(
+                units=4097,
+                activation=activations.linear,
+                use_bias=True,
+                kernel_initializer=initializers.RandomNormal(mean=0.0, stddev=1.0, seed=None),
+                bias_initializer=initializers.Zeros(),
+                kernel_regularizer=None,
+                bias_regularizer=None,
+                activity_regularizer=None,
+                kernel_constraint=None,
+                bias_constraint=None,
+                batch_size=batch_size,
+                name='decoder'
+            )
+        ],
+        name='decoder'
+    )
+    # Define the SVD auto-encoder:
+    svd_autoencoder = Autoencoder(
+        encoder=encoder,
+        latent=latent,
+        decoder=decoder,
+        name='autoencoder'
     )
     # Setup the compilation arguments for the model:
     optimizer: tf.keras.optimizers.Optimizer = tf.keras.optimizers.SGD(
@@ -177,22 +243,91 @@ def main(args):
         reduction=losses_utils.ReductionV2.AUTO,    # This is primarily relevant for distributed TensorFlow
         name='binary_crossentropy'
     )
-    # Compile the model (see: https://www.tensorflow.org/api_docs/python/tf/keras/Model#compile):
-    autoencoder.compile(
+    # Build the component models:
+    encoder.build(input_shape=(150, 4097, 1))
+    latent.build(input_shape=())
+    decoder.build(input_shape=(150, 4097, 1))
+    # Compile the component models:
+    encoder.compile(
         optimizer=optimizer,
-        loss=loss_func,
-        metrics=None,
-        loss_weights=None,
-        weighted_metrics=None,
-        run_eagerly=is_debug,
-        # The number of batches to run during each tf.function call. At most one full epoch per execution.
-        steps_per_execution=1
+        loss=loss_func
     )
+    latent.compile(
+        optimizer=optimizer
+    )
+    decoder.compile(
+        optimizer=optimizer,
+        loss=loss_func
+    )
+    # Compile the model (see: https://www.tensorflow.org/api_docs/python/tf/keras/Model#compile):
+    svd_autoencoder.compile(
+        encoder_optimizer=optimizer,
+        decoder_optimizer=optimizer,
+        loss_function=loss_func
+    )
+    svd_autoencoder.build(
+        input_shape=(150, 4097, 1)
+    )
+    print(svd_autoencoder.summary())
     # Train/fit the model (see: https://www.tensorflow.org/api_docs/python/tf/keras/Model#fit):
-    autoencoder.fit(
-        x=???
+    svd_autoencoder.fit(
+        tf_record_ds,
+        epochs=10,
+        shuffle=False
     )
-    pass
+    exit(0)
+
+
+    # BottleneckLayer the encoding/latent-code of the data (here for the SVD case):
+    # bottleneck_layer: BottleneckLayer = BottleneckLayer(
+    #     num_neurons=4097,
+    #     activation=tf.keras.activations.linear,
+    #     kernel_initializer=initializers.TruncatedNormal(mean=0.0, stddev=0.05, seed=None),
+    #     bias_initializer=initializers.Zeros(),
+    #     kernel_regularizer=None,
+    #     bias_regularizer=None,
+    #     activity_regularizer=None,
+    #     kernel_constraint=None,
+    #     bias_constraint=None,
+    #     name='bottleneck_layer'
+    # )
+
+    # Instantiate the model:
+    # autoencoder = make_sequential_autoencoder_model(
+    #     receptive_field_size=4097,
+    #     bottleneck_layer=bottleneck_layer,
+    #     batch_size=batch_size
+    # )
+    # # Setup the compilation arguments for the model:
+    # optimizer: tf.keras.optimizers.Optimizer = tf.keras.optimizers.SGD(
+    #     learning_rate=0.01,
+    #     momentum=0.0,
+    #     nesterov=True,
+    #     name='sgd_nesterov'
+    # )
+    # # see: https://www.tensorflow.org/api_docs/python/tf/keras/losses/BinaryCrossentropy#args_1
+    # loss_func: tf.keras.losses.Loss = tf.keras.losses.BinaryCrossentropy(
+    #     from_logits=True,   # We are providing y_pred as the logits tensor, and not a stand-alone probability dist.
+    #     label_smoothing=0,
+    #     reduction=losses_utils.ReductionV2.AUTO,    # This is primarily relevant for distributed TensorFlow
+    #     name='binary_crossentropy'
+    # )
+    # # Compile the model (see: https://www.tensorflow.org/api_docs/python/tf/keras/Model#compile):
+    # autoencoder.compile(
+    #     optimizer=optimizer,
+    #     loss=loss_func,
+    #     metrics=None,
+    #     loss_weights=None,
+    #     weighted_metrics=None,
+    #     run_eagerly=is_debug,
+    #     # The number of batches to run during each tf.function call. At most one full epoch per execution.
+    #     steps_per_execution=1
+    # )
+    # Train/fit the model (see: https://www.tensorflow.org/api_docs/python/tf/keras/Model#fit):
+    # autoencoder.fit(
+    #     x=???
+    # )
+    # pass
 
 
 if __name__ == '__main__':
@@ -202,6 +337,7 @@ if __name__ == '__main__':
     parser.add_argument('--dataset-split', type=str, nargs=1, action='store', dest='dataset_split_str', required=True,
                         help='The dataset split that should be loaded (e.g. train, test, val, or all).')
     parser.add_argument('--batch-size', type=int, action='store', dest='batch_size', required=True)
-    parser.add_argument('--order-deterministically', type=bool, action='store', dest='order_deterministically', required=True)
+    parser.add_argument('--order-deterministically', type=bool, action='store', dest='order_deterministically',
+                        required=True)
     command_line_args = parser.parse_args()
     main(args=command_line_args)
