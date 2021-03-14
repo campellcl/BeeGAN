@@ -91,7 +91,7 @@ class TFRecordLoader:
         return self._root_data_dir
 
     @staticmethod
-    def deserialize_tf_record(serialized_tf_record: bytes) -> Tuple[tf.Tensor, tf.Tensor]:
+    def deserialize_tf_record(serialized_tf_record: bytes) -> tf.Tensor:
         """
         deserialize_tf_record: Takes in a serialized TFRecord file, and de-serializes the TFRecord into a tf.Tensor.
          Then this method will de-serialize the ByteList objects to return a tuple containing two Tensors:
@@ -149,7 +149,7 @@ class TFRecordLoader:
             out_type=tf.float32,
             name='frequencies'
         )
-        return iso_8601_tensor, frequencies_tensor
+        return frequencies_tensor
 
 
 def main(args):
@@ -202,10 +202,10 @@ def main(args):
     # There will be (dataset_batch_size x 4097) raw/encoded 2D spectrogram tensors in the tf_example_batch[1]:
     spectrogram_tensor_batch = tf_example_batch[1]
 
-    # A single sample by default size (4097,) is hence:
+    # A single sample by default size (4097, 1) is hence:
     sample = spectrogram_tensor_batch[0]
+    # And it's corresponding ISO 8601 string of size () is hence:
     sample_iso_8601_str = iso_8601_tensor_batch[0]
-
     exit(0)
 
 
