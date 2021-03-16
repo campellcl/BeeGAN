@@ -11,10 +11,12 @@ from scipy import signal
 from multiprocessing import Pool, cpu_count
 from tqdm import tqdm
 import datetime
-from dateutil import rrule
+from datetime import timedelta
 import pandas as pd
+from dateutil.parser import isoparse
 from Utils.EnumeratedTypes.DatasetSplitType import DatasetSplitType
 from Utils.BlacklistedSamples import blacklisted_samples
+from Utils.DatetimeUtils import DatetimeUtils
 
 
 _DEFAULT_AUDIO_DURATION = 60     # seconds
@@ -104,7 +106,8 @@ class ConvertWAVToTFRecord:
         self._audio_file_paths: List[str] = self.get_audio_file_paths_in_root_data_dir(
             blacklisted_filenames=blacklisted_samples
         )
-        self._num_samples: int = len(self._audio_file_paths)
+        self._num_audio_files: int = len(self._audio_file_paths)
+        self._num_samples: Optional[int] = None
         # Create a metadata dataframe by augmenting the list of all audio file paths with time information (from the
         # file names):
         self._beemon_df: pd.DataFrame = self._create_beemon_metadata_df()
@@ -112,59 +115,100 @@ class ConvertWAVToTFRecord:
         Pre-Process a single sample/audio file to determine the shape of the produced spectrogram given the current 
          runtime settings. This information is required to pre-compute the shard size of the resulting TFRecords:
         '''
-        sample = self._beemon_df.iloc[0]
-        audio_file_path: str = sample['file_path']
-        sample_iso_8601: str = sample['iso_8601']
+        sample_spectrogram = self._beemon_df.iloc[0]
+        audio_file_path: str = sample_spectrogram['file_path']
+        spectrogram_iso_8601: str = sample_spectrogram['iso_8601']
         # Read in the audio at the specified file path while re-sampling it at the specified rate:
         audio, sample_rate = librosa.load(audio_file_path, sr=self.sample_rate)
         freqs, time_segs, spectrogram = self.apply_fourier_transform(audio_sample=audio)
         self._spectrogram_shape = spectrogram.shape
+        self._num_samples_per_spectrogram: int = spectrogram.shape[1]
+        # A single column of the spectrogram (a 4097 length 1D vector by default) is a single sample for our use case:
+        sample = spectrogram[:, 0]
+
+
+        # Calculate the ISO timestamp offset for the sample:
+        sample_iso_8601: datetime.datetime = self._get_sample_iso_timestamp_offset(
+            spectrogram_iso_8601=spectrogram_iso_8601,
+            sample_index=0,
+            time_segments=time_segs
+        )
         # Now we can compute how many samples will fit within an individual TFRecord:
         self._max_num_samples_per_tf_record_file: int = self._compute_maximum_num_samples_per_tf_record(
-            spectrogram=spectrogram,
-            iso_8601=sample_iso_8601
+            sample=sample,
+            sample_iso_8601=sample_iso_8601
         )
         # These object properties are initially None (on instantiation), but are set automatically during the sharding
         # process. Perform NoneType checks before utilizing them prior to sharding.
+        self._num_spectra: Optional[int] = None
+        self._num_train_spectra: Optional[int] = None
         self._num_train_samples: Optional[int] = None
+
+        self._num_val_spectra: Optional[int] = None
         self._num_val_samples: Optional[int] = None
+
         self._num_test_samples: Optional[int] = None
+        self._num_test_spectra: Optional[int] = None
+
         self._num_train_shards: Optional[int] = None
         self._num_val_shards: Optional[int] = None
         self._num_test_shards: Optional[int] = None
 
+    def _get_sample_iso_timestamp_offset(
+            self, spectrogram_iso_8601: str, sample_index: int, time_segments: np.ndarray) -> datetime.datetime:
+        """
+        _get_sample_iso_timestamp_offset: Calculates the ISO 8601 timestamp of a particular sample from the spectrogram
+         by offsetting the ISO 8601 timestamp for the entire audio source by the length of an individual time segment in
+         the spectrogram, and the index of the provided time segment bin that the sample was taken from.
+        :param spectrogram_iso_8601: <str> The ISO 8601 timestamp corresponding to the entire spectrogram of the source
+         audio file.
+        :param sample_index: <int> The index (by default a range of [0-65] inclusive) of the time segment of the
+         spectrogram that the sample (whose ISO timestamp is to be determined) was taken from. This corresponds to the
+         column index in the source 2D spectrogram.
+        :param time_segments: <float> The list of time segments (in seconds) produced by scipy.signal.spectrogram
+         corresponding to when the FFT was computed for the corresponding list of frequencies.
+        :return:
+        """
+        sample_iso_8601: object
+        spectrogram_iso_timestamp: datetime.datetime = isoparse(spectrogram_iso_8601)
+        delta = timedelta(seconds=time_segments[sample_index])
+        sample_iso_8601: datetime.datetime = spectrogram_iso_timestamp + delta
+        return sample_iso_8601
+
     @staticmethod
-    def convert_sample_to_tf_example(spectrogram: np.ndarray, iso_8601: str) -> tf.train.Example:
+    def convert_sample_to_tf_example(sample: np.ndarray, iso_8601_str: str) -> tf.train.Example:
         """
         convert_sample_to_tf_example: Takes the native data format of a single sample in the dataset and performs the
          conversion of the audio spectrogram and associated ISO 8601 string to a tf.train.Example item which can then
          be further serialized and written (in batch) to a TFRecord file downstream.
-        :param spectrogram: <np.ndarray> A 2D numpy array representing the spectrogram of a single audio file sample.
-        :param iso_8601: <str> The ISO 8601 datetime string produced by parsing the name of the audio file, which was
-         used to generate the spectrogram supplied in conjunction to this method.
+        :param sample: <np.ndarray> A 1D numpy array representing a single column of a spectrogram of a single
+         audio file sample. By default a single sample will be size (4097,).
+        :param iso_8601_str: <str> The ISO 8601 datetime string corresponding to the sample. This value is produced by
+         parsing the name of the audio file, which was used to generate the spectrogram (supplied in conjunction to this
+         method) and offsetting by the time bin of the individual sample.
         :source: https://www.kaggle.com/ryanholbrook/tfrecords-basics#tf.Example
         :return tf_example: <tf.train.Example> The original sample encoded as a tf.train.Example object compatible with
          TFRecord files.
         """
         tf_example: tf.train.Example
         # TFRecord files only support 1D data, so we must first convert the spectrogram 2D np.ndarray to a Tensor:
-        spectrogram_tensor: tf.Tensor = tf.convert_to_tensor(spectrogram)
+        sample_tensor: tf.Tensor = tf.convert_to_tensor(sample)
         # Then we must serialize the Tensor:
-        spectrogram_serialized_tensor: tf.Tensor = tf.io.serialize_tensor(spectrogram_tensor)
+        serialized_sample_tensor: tf.Tensor = tf.io.serialize_tensor(sample_tensor)
         # And retrieve the Byte String via the numpy method:
-        spectrogram_bytes_list: tf.train.BytesList = spectrogram_serialized_tensor.numpy()
+        sample_bytes_list: tf.train.BytesList = serialized_sample_tensor.numpy()
 
         # Convert the ISO 8601 string to a Tensor:
-        iso_tensor: tf.Tensor = tf.convert_to_tensor(iso_8601)
+        iso_tensor: tf.Tensor = tf.convert_to_tensor(iso_8601_str)
         # Serialize the Tensor:
         iso_8601_serialized_tensor: tf.Tensor = tf.io.serialize_tensor(iso_tensor)
         # Retrieve the Byte String via the numpy method:
         iso_8601_bytes_list: tf.train.BytesList = iso_8601_serialized_tensor.numpy()
 
         # Now wrap the BytesLists in Feature objects:
-        spectrogram_feature = tf.train.Feature(
+        sample_feature = tf.train.Feature(
             bytes_list=tf.train.BytesList(value=[
-                spectrogram_bytes_list
+                sample_bytes_list
             ])
         )
         iso_8601_feature = tf.train.Feature(
@@ -174,7 +218,7 @@ class ConvertWAVToTFRecord:
         )
         # Create the Features dictionary:
         features = tf.train.Features(feature={
-            'spectrogram': spectrogram_feature,
+            'frequencies': sample_feature,
             'iso_8601': iso_8601_feature
         })
         # Finally, wrap the features dictionary with a tensorflow example:
@@ -224,28 +268,28 @@ class ConvertWAVToTFRecord:
         :param beemon_df: <pd.DataFrame> The pandas DataFrame containing the metadata for all audio files in the
          dataset. Each record contains the path to an audio file, the ISO 8601 datetime corresponding to the audio file
          name, and additional datetime convenience fields (such as year, day, and week).
-        :param max_num_samples_per_tf_record_file: <int> The maximum number of samples (spectrogram and ISO 8601 pairs)
+        :param max_num_samples_per_tf_record_file: <int> The maximum number of samples (1D np array and ISO 8601 pairs)
          which will fit into a single TFRecord file while adhering to the 200 MB recommended file size limitation.
-        :return train_shards, num_train_samples, val_shards, num_val_samples, test_shards, num_test_samples:
+        :return train_shards, num_train_spectra, val_shards, num_val_spectra, test_shards, num_test_spectra:
         :return train_shards: <List[Tuple[str, List[int]]]> A list of shard filenames, and the associated indices in the
          provided beemon_df that should be used to produce the shard.
-        :return num_train_samples: <int> The number of training samples that have been sharded. This corresponds to the
-         summation of the length of every list associated with every shard entry in the train_shards list of tuples.
+        :return num_train_spectra: <int> The number of training spectrograms that have been sharded. This corresponds to
+         the summation of the length of every list associated with every shard entry in the train_shards list of tuples.
         :return val_shards: <List[Tuple[str, List[int]]]> A list of shard filenames, and the associated indices in the
          provided beemon_df that should be used to produce the shard.
-        :return num_val_samples: <int> The number of validation samples that have been sharded. This corresponds to the
+        :return num_val_spectra: <int> The number of validation samples that have been sharded. This corresponds to the
          summation of the length of every list associated with every shard entry in the val_shards list of tuples.
         :return test_shards: <List[Tuple[str, List[int]]]> A list of shard filenames, and the associated indices in the
          provided beemon_df that should be used to produce the shard.
-        :return num_test_samples: <int> The number of testing samples that have been sharded. This corresponds to the
+        :return num_test_spectra: <int> The number of testing samples that have been sharded. This corresponds to the
          summation of the length of every list associated with every shard entry in the test_shards list of tuples.
         """
         train_shards: List[Tuple[str, List[int]]] = []
-        num_train_samples: int
+        num_train_spectra: int
         val_shards: List[Tuple[str, List[int]]] = []
-        num_val_samples: int
+        num_val_spectra: int
         test_shards: List[Tuple[str, List[int]]] = []
-        num_test_samples: int
+        num_test_spectra: int
 
         # Do the train, test, val, split partition of the metadata dataframe (prior to sharding each dataset):
         train_indices, val_indices, test_indices = self._train_test_val_split(
@@ -256,13 +300,14 @@ class ConvertWAVToTFRecord:
         assert len(val_indices) == len(set(val_indices))
         assert len(test_indices) == len(set(test_indices))
 
-        # Hold onto the number of samples for later:
-        num_train_samples = len(train_indices)
-        self.num_train_samples = num_train_samples
-        num_val_samples = len(val_indices)
-        self.num_val_samples = num_val_samples
-        num_test_samples = len(test_indices)
-        self.num_test_samples = num_test_samples
+        # Hold onto the number of spectrograms for later:
+        num_train_spectra = len(train_indices)
+        self._num_train_spectra = num_train_spectra
+        num_val_spectra = len(val_indices)
+        self._num_val_spectra = num_val_spectra
+        num_test_spectra = len(test_indices)
+        self._num_test_spectra = num_test_spectra
+        self._num_spectra = num_train_spectra + num_val_spectra + num_test_spectra
 
         # Shard the datasets:
         train_meta_df: pd.DataFrame = self.beemon_df.iloc[train_indices]
@@ -316,8 +361,10 @@ class ConvertWAVToTFRecord:
         for day_of_year in meta_df['date'].dt.day_of_year.unique():
             day_df_subset = meta_df[meta_df['date'].dt.day_of_year == day_of_year]
             ''' shard the entire day: '''
+            # Determine how many samples reside in the day's subset:
+            num_samples_in_subset: int = day_df_subset.shape[0] * self._num_samples_per_spectrogram
             # Determine how many shards will be needed to store the entire day subset:
-            num_partial_shards_required_for_day: int = math.ceil(day_df_subset.shape[0] / max_num_samples_per_shard)
+            num_partial_shards_required_for_day: int = math.ceil(num_samples_in_subset / max_num_samples_per_shard)
             day_requires_multiple_shards: bool
             if num_partial_shards_required_for_day > 1:
                 day_requires_multiple_shards = True
@@ -328,7 +375,7 @@ class ConvertWAVToTFRecord:
 
             if not day_requires_multiple_shards:
                 # This day will fit into a single shard.
-                num_samples_in_shard: int = min(max_num_samples_per_shard, day_df_subset.shape[0])
+                num_samples_in_shard: int = min(max_num_samples_per_shard, num_samples_in_subset)
                 shard_indices: np.ndarray = day_df_subset.index.values
                 # Construct a file path for the shard of the form: 'train-001-00-180.tfrec'
                 # This corresponds to: dataset_split-dataset_shard_index-partial_shard_index-num_samples_in_shard.tfrec'
@@ -363,21 +410,26 @@ class ConvertWAVToTFRecord:
                     global_split_shard_index += 1
         return shards
 
-    def _compute_maximum_num_samples_per_tf_record(self, spectrogram: np.ndarray, iso_8601: str) -> int:
+    def _compute_maximum_num_samples_per_tf_record(self, sample: np.ndarray, sample_iso_8601: datetime.datetime) -> int:
         """
         _compute_maximum_num_samples_per_tf_record: Determines how many spectrograms (of the provided dimensions and
          datatype) will fit into a single TFRecord shard to stay within the 100 MB to 200 MB limit that is recommended
          by the TensorFlow documentation (see: https://www.tensorflow.org/tutorials/load_data/tfrecord).
-        :param spectrogram: <np.ndarray> The input spectrogram (presumably produced by scipy.signal.spectrogram) whose
-         dimensionality and datatype should be used to calculate the maximum number of samples with the same size and
-         data type that will be able to be stored in TFRecord format.
+        :param sample: <np.ndarray> A single row of the source spectrogram (presumably produced by
+         scipy.signal.spectrogram) whose dimensionality and datatype should be used to calculate the maximum number of
+         samples with the same size and data type that will be able to be stored in TFRecord format.
         :return max_num_examples_per_tf_record: <int> The maximum number of spectra (encoded as tf.train.Examples) which
          will fit in a single TFRecord shard to stay withing the recommended file size limit of a single TFRecord shard.
         """
         max_num_samples_per_tf_record: int
 
+        # An individual sample is a single row of the spectrogram of size 4097.
+        # Convert the datetime timestamp to ISO 8601 representation:
+        sample_iso_8601_str: str = DatetimeUtils.convert_datetime_object_to_iso_8601_zulu_notation(
+            date_time=sample_iso_8601
+        )
         # Convert the sample into a tf.train.Example:
-        example: tf.train.Example = self.convert_sample_to_tf_example(spectrogram=spectrogram, iso_8601=iso_8601)
+        example: tf.train.Example = self.convert_sample_to_tf_example(sample=sample, iso_8601_str=sample_iso_8601_str)
         # Serialize the tf.train.Example to get the number of bytes required to store a single sample in the dataset:
         serialized_example: bytes = example.SerializeToString()
 
@@ -578,7 +630,9 @@ class ConvertWAVToTFRecord:
         num_per_segment: int = 2 ** closest_power_of_two_to_provided_sample_rate
         # Use the default number of points to overlap (Tukey window) as:
         # num_points_to_overlap: int = num_per_segment // 8
-        freqs, time_segs, spectrogram = signal.spectrogram(audio_sample, nperseg=num_per_segment, mode='magnitude')
+        freqs, time_segs, spectrogram = signal.spectrogram(
+            audio_sample, nperseg=num_per_segment, fs=self.sample_rate, mode='magnitude'
+        )
         return freqs, time_segs, spectrogram
 
     def _get_shard_output_file_path(self, dataset_split_type: DatasetSplitType, shard_id: int, shard_size: int):
@@ -617,7 +671,7 @@ class ConvertWAVToTFRecord:
         # of a day of data for large days that span multiple shards):
         for i, (shard_file_path, shard_indices) in enumerate(shard_metadata):
             if self.is_debug:
-                print('Preprocessing data for shard [{:02d}/{:02d}] \'{}\':'.format(i, len(shard_metadata), shard_file_path))
+                print('Preprocessing data for shard [{:02d}/{:02d}] \'{}\':'.format(i+1, len(shard_metadata), shard_file_path))
             # Create a list to hold the concatenated spectra that will make up a single shard:
             shard_data: List[tf.train.Example] = []
             # If the shuffle_shard_data boolean flag is set to true, we want to randomize the data in each shard. This
@@ -626,18 +680,30 @@ class ConvertWAVToTFRecord:
                 np.random.shuffle(shard_indices)
             for j, shard_index in enumerate(shard_indices):
                 if self.is_debug:
-                    print('\tPreprocessing sample [{:03d}/{:03d}] for shard {:01d}'.format(j, len(shard_indices), i))
-                sample = self._beemon_df.iloc[shard_index]
-                audio_file_path: str = sample['file_path']
-                sample_iso_8601: str = sample['iso_8601']
+                    print('\tPreprocessing spectra [{:03d}/{:03d}] for shard {:01d}'.format(j+1, len(shard_indices), i))
+                spectrogram_sample = self._beemon_df.iloc[shard_index]
+                audio_file_path: str = spectrogram_sample['file_path']
+                spectrogram_iso_8601: str = spectrogram_sample['iso_8601']
                 # Read in the audio at the specified file path while re-sampling it at the specified rate:
                 audio, sample_rate = librosa.load(audio_file_path, sr=self.sample_rate)
                 # Apply the Fourier transform to get the spectrogram
                 freqs, time_segs, spectrogram = self.apply_fourier_transform(audio_sample=audio)
-                # Convert the spectrogram to a tf.train.Example:
-                tf_example = self.convert_sample_to_tf_example(spectrogram=spectrogram, iso_8601=sample_iso_8601)
-                # Append the tf.train.Example to the shard's data for the day:
-                shard_data.append(tf_example)
+                # By default there will be 66 audio samples per-spectrogram:
+                for k in range(spectrogram.shape[1]):
+                    sample = spectrogram[:, k]
+                    # Calculate the ISO 8601 offset for the single sample:
+                    sample_iso_8601: datetime.datetime = self._get_sample_iso_timestamp_offset(
+                        spectrogram_iso_8601=spectrogram_iso_8601,
+                        sample_index=k,
+                        time_segments=time_segs
+                    )
+                    sample_iso_8601_str: str = DatetimeUtils.convert_datetime_object_to_iso_8601_zulu_notation(
+                        date_time=sample_iso_8601
+                    )
+                    # Convert the sample to a tf.train.Example:
+                    tf_example = self.convert_sample_to_tf_example(sample=sample, iso_8601_str=sample_iso_8601_str)
+                    # Append the tf.train.Example to the shard's data for the day:
+                    shard_data.append(tf_example)
             self._write_tfrecord_file(shard_file_path=shard_file_path, shard_data=shard_data)
         return
 
@@ -821,11 +887,11 @@ def main(args):
     print(convert_wav_to_tf_record)
     # Get the (future) shard filenames and the associated indices in the Beemon DataFrame that will be used to produce
     #  the specified shards, for each dataset split:
-    train_shards, val_shards, test_shards = convert_wav_to_tf_record.shard_datasets()
+    train_spectra_shards, val_spectra_shards, test_spectra_shards = convert_wav_to_tf_record.shard_datasets()
     # Write TFRecord shards to the disk:
-    convert_wav_to_tf_record.write_shards_to_output_directory(shard_metadata=train_shards, shuffle_shard_data=True)
-    convert_wav_to_tf_record.write_shards_to_output_directory(shard_metadata=val_shards, shuffle_shard_data=True)
-    convert_wav_to_tf_record.write_shards_to_output_directory(shard_metadata=test_shards, shuffle_shard_data=True)
+    convert_wav_to_tf_record.write_shards_to_output_directory(shard_metadata=train_spectra_shards, shuffle_shard_data=True)
+    convert_wav_to_tf_record.write_shards_to_output_directory(shard_metadata=val_spectra_shards, shuffle_shard_data=True)
+    convert_wav_to_tf_record.write_shards_to_output_directory(shard_metadata=test_spectra_shards, shuffle_shard_data=True)
     sys.exit(0)
 
 

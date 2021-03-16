@@ -91,7 +91,7 @@ class TFRecordLoader:
         return self._root_data_dir
 
     @staticmethod
-    def deserialize_tf_record(serialized_tf_record: bytes) -> tf.Tensor:
+    def deserialize_tf_record(serialized_tf_record: bytes) -> Tuple[tf.Tensor, tf.Tensor]:
         """
         deserialize_tf_record: Takes in a serialized TFRecord file, and de-serializes the TFRecord into a tf.Tensor.
          Then this method will de-serialize the ByteList objects to return a tuple containing two Tensors:
@@ -149,7 +149,7 @@ class TFRecordLoader:
             out_type=tf.float32,
             name='frequencies'
         )
-        return frequencies_tensor
+        return frequencies_tensor, frequencies_tensor
 
 
 def main(args):

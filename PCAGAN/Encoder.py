@@ -1,31 +1,102 @@
 import os
 import argparse
 import tensorflow as tf
-from tensorflow.keras import layers, losses, activations
+from tensorflow.keras import layers, losses, activations, initializers, optimizers, metrics
 from Utils.EnumeratedTypes.DatasetSplitType import DatasetSplitType
 from Utils.TensorFlow.TFRecordLoader import TFRecordLoader
 
 latent_dim = 1
 
 
-class SVDAutoencoder(tf.keras.Model):
+class Encoder(layers.Layer):
 
-    def __init__(self, latent_dim: int):
-        super(SVDAutoencoder, self).__init__()
-        self.latent_dim = latent_dim
-        self.encoder = tf.keras.Sequential([
-          layers.Flatten(),
-          layers.Dense(latent_dim, activation=activations.linear),
-        ])
-        self.decoder = tf.keras.Sequential([
-          layers.Dense(4097, activation=activations.linear),
-          layers.Reshape((28, 28))
-        ])
+    def __init__(self, original_dim: int, latent_dim: int):
+        super(Encoder, self).__init__()
+        self.encoder = layers.Dense(
+            input_shape=(1, 4097),
+            units=latent_dim,
+            activation=activations.linear,
+            use_bias=False,
+            kernel_initializer=initializers.RandomNormal(mean=0.0, stddev=0.05, seed=None),
+            bias_initializer=None,
+            kernel_regularizer=None,
+            bias_regularizer=None,
+            activity_regularizer=None,
+            kernel_constraint=None,
+            bias_constraint=None,
+            name='encoder'
+        )
 
-    def call(self, x):
-        encoded = self.encoder(x)
-        decoded = self.decoder(encoded)
-        return decoded
+    def call(self, inputs, **kwargs):
+        # print('inputs shape: (%s, %s)' % (inputs[0].shape, inputs[1].shape))
+        return self.encoder(inputs)
+
+
+class Decoder(layers.Layer):
+
+    def __init__(self, output_dim: int, **kwargs):
+        super(Decoder, self).__init__(**kwargs)
+        self.output_layer = layers.Dense(
+            units=output_dim,
+            input_shape=(1,),
+            activation=activations.linear,
+            use_bias=True,
+            kernel_initializer=initializers.RandomNormal(mean=0.0, stddev=0.05, seed=None),
+            bias_initializer=initializers.zeros,
+            kernel_regularizer=None,
+            bias_regularizer=None,
+            activity_regularizer=None,
+            kernel_constraint=None,
+            bias_constraint=None,
+            name='decoder'
+        )
+
+    def call(self, latent_encoding, **kwargs):
+        return self.output_layer(latent_encoding)
+
+
+class Autoencoder(tf.keras.Model):
+
+    def __init__(self, latent_dim, original_dim):
+        super(Autoencoder, self).__init__()
+        self.encoder = Encoder(original_dim=original_dim, latent_dim=latent_dim)
+        self.decoder = Decoder(output_dim=original_dim)
+        self._loss_tracker = metrics.Mean(name='loss')
+
+    def call(self, x, **kwargs):
+        latent_code = self.encoder(x)
+        reconstructed = self.decoder(latent_code)
+        return reconstructed
+
+    def reconstruction_error(self, y_pred, y_true):
+        reconstruction_error = tf.reduce_mean(tf.square(tf.subtract(y_pred, y_true)))
+        return reconstruction_error
+
+    def train_step(self, data):
+        if isinstance(data, tuple):
+            data = data[0]
+        loss_fn = losses.BinaryCrossentropy(from_logits=False, label_smoothing=0)
+
+        with tf.GradientTape() as tape:
+            # Run the input 1D frequency vector through the auto-encoder:
+            latent_code = self.encoder(data)
+            # Run the encoded latent representation through the decoder:
+            reconstructed = self.decoder(latent_code)
+            # Compute the reconstruction error as a loss function:
+            loss = self.reconstruction_error(y_true=data, y_pred=reconstructed)
+
+        # Use the gradient tape to compute the gradients of the trainable variables with respect to the loss:
+        gradients = tape.gradient(loss, self.trainable_variables)
+        # Run one step of gradient descent by updating the value of the variables to minimize the loss:
+        self.optimizer.apply_gradients(grads_and_vars=zip(gradients, self.trainable_variables))
+        # Compute and retain the loss metric:
+        self._loss_tracker.update_state(values=loss)
+        return {'loss': self._loss_tracker.result()}
+
+    @property
+    def metrics(self):
+        # see: https://www.tensorflow.org/guide/keras/customizing_what_happens_in_fit/#going_lower-level
+        return [self._loss_tracker]
 
 
 def main(args):
@@ -68,12 +139,19 @@ def main(args):
       order_deterministically=order_deterministically
     )
     tf_record_ds: tf.data.TFRecordDataset = tf_record_loader.get_tf_record_dataset(
-      batch_size=batch_size
+      batch_size=1
     )
 
-    autoencoder = SVDAutoencoder(latent_dim)
+    # loss_tracker = metrics.Mean(name='loss')
+    autoencoder = Autoencoder(latent_dim=latent_dim, original_dim=4097)
     autoencoder.compile(optimizer='adam', loss=losses.MeanSquaredError())
-    autoencoder.fit(tf_record_ds, tf_record_ds, epochs=10, shuffle=False)
+    autoencoder.build(input_shape=(1, 4097))
+    print(autoencoder.summary())
+    # steps_per_epcoh: Total number of steps (batches of samples) before declaring one epoch finished and starting the next epoch.
+    autoencoder.fit(tf_record_ds, epochs=10, shuffle=False, steps_per_epoch=None)
+    # autoencoder = SVDAutoencoder(latent_dim)
+    # autoencoder.compile(optimizer='adam', loss=losses.MeanSquaredError())
+    # autoencoder.fit(tf_record_ds, tf_record_ds, epochs=10, shuffle=False)
 
 
 if __name__ == '__main__':
