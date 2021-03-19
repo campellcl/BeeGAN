@@ -68,7 +68,9 @@ class Autoencoder(tf.keras.Model):
         reconstructed = self.decoder(latent_code)
         return reconstructed
 
-    def reconstruction_error(self, y_pred, y_true):
+    @staticmethod
+    def reconstruction_error(y_pred, y_true):
+        # MSE
         reconstruction_error = tf.reduce_mean(tf.square(tf.subtract(y_pred, y_true)))
         return reconstruction_error
 
@@ -110,26 +112,30 @@ def main(args):
     dataset_split_type: DatasetSplitType
 
     # Ensure that the provided arguments are valid:
+    cwd = os.getcwd()
     if not os.path.isdir(root_data_dir):
-      raise FileNotFoundError('The provided root data directory \'%s\' is invalid!' % root_data_dir)
+        raise FileNotFoundError('The provided root data directory \'%s\' is invalid!' % root_data_dir)
     else:
-      os.chdir(root_data_dir)
+        os.chdir(root_data_dir)
+    os.chdir(cwd)
     # Ensure the provided dataset split can be parsed:
     if dataset_split_str == DatasetSplitType.TRAIN.value:
-      dataset_split_type = DatasetSplitType.TRAIN
+        dataset_split_type = DatasetSplitType.TRAIN
     elif dataset_split_str == DatasetSplitType.VAL.value:
-      dataset_split_type = DatasetSplitType.VAL
+        dataset_split_type = DatasetSplitType.VAL
     elif dataset_split_str == DatasetSplitType.TEST.value:
-      dataset_split_type = DatasetSplitType.TEST
+        dataset_split_type = DatasetSplitType.TEST
     elif dataset_split_str == DatasetSplitType.ALL.value:
-      dataset_split_type = DatasetSplitType.ALL
+        dataset_split_type = DatasetSplitType.ALL
     else:
-      raise NotImplementedError('The provided dataset split type: \'%s\' was not recognized. Provide a value of: '
-                                '\'train\', \'val\', \'test\', or \'all\'.' % dataset_split_str)
+        raise NotImplementedError('The provided dataset split type: \'%s\' was not recognized. Provide a value of: '
+                                  '\'train\', \'val\', \'test\', or \'all\'.' % dataset_split_str)
     if is_debug:
-      # For debugging (see:
-      # https://www.tensorflow.org/guide/effective_tf2#use_tfconfigexperimental_run_functions_eagerly_when_debugging)
-      tf.config.run_functions_eagerly(True)
+        # For debugging (see:
+        # https://www.tensorflow.org/guide/effective_tf2#use_tfconfigexperimental_run_functions_eagerly_when_debugging)
+        tf.config.run_functions_eagerly(True)
+        # Log tensor placement (see: https://www.tensorflow.org/guide/gpu#logging_device_placement):
+        # tf.debugging.set_log_device_placement(True)
 
     # Obtain the TFRecord dataset corresponding to the requested dataset split ('train', 'val', 'test', 'all'):
     tf_record_loader: TFRecordLoader = TFRecordLoader(
@@ -139,16 +145,21 @@ def main(args):
       order_deterministically=order_deterministically
     )
     tf_record_ds: tf.data.TFRecordDataset = tf_record_loader.get_tf_record_dataset(
-      batch_size=1
+      batch_size=batch_size
     )
 
     # loss_tracker = metrics.Mean(name='loss')
     autoencoder = Autoencoder(latent_dim=latent_dim, original_dim=4097)
     autoencoder.compile(optimizer='adam', loss=losses.MeanSquaredError())
-    autoencoder.build(input_shape=(1, 4097))
+    autoencoder.build(input_shape=(batch_size, 4097))
     print(autoencoder.summary())
+    # tensorboard callback for profiling training process:
+    # tb_callback = tf.keras.callbacks.TensorBoard(log_dir=os.path.join(os.getcwd(), '../Output'), profile_batch='10, 15')
+    # autoencoder.fit(tf_record_ds, epochs=10, shuffle=False, steps_per_epoch=None, callbacks=[tb_callback])
+
     # steps_per_epcoh: Total number of steps (batches of samples) before declaring one epoch finished and starting the next epoch.
     autoencoder.fit(tf_record_ds, epochs=10, shuffle=False, steps_per_epoch=None)
+
     # autoencoder = SVDAutoencoder(latent_dim)
     # autoencoder.compile(optimizer='adam', loss=losses.MeanSquaredError())
     # autoencoder.fit(tf_record_ds, tf_record_ds, epochs=10, shuffle=False)
