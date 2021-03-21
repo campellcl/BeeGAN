@@ -61,7 +61,6 @@ class Autoencoder(tf.keras.Model):
         super(Autoencoder, self).__init__()
         self.encoder = Encoder(original_dim=original_dim, latent_dim=latent_dim)
         self.decoder = Decoder(output_dim=original_dim)
-        self._loss_tracker = metrics.Mean(name='loss')
 
     def call(self, x, **kwargs):
         latent_code = self.encoder(x)
@@ -69,36 +68,61 @@ class Autoencoder(tf.keras.Model):
         return reconstructed
 
     @staticmethod
-    def reconstruction_error(y_pred, y_true):
-        # MSE
-        reconstruction_error = tf.reduce_mean(tf.square(tf.subtract(y_pred, y_true)))
-        return reconstruction_error
+    def mean_squared_error(y_pred, y_true):
+        mse = tf.reduce_mean(tf.square(tf.subtract(y_pred, y_true)))
+        return mse
+
+    @staticmethod
+    def root_mean_squared_error(y_pred, y_true):
+        rmse = tf.sqrt(tf.reduce_mean(tf.square(tf.subtract(y_pred, y_true))))
+        return rmse
 
     def train_step(self, data):
+        """
+        train_step: TODO: Docstrings.
+        :param data:
+        :return:
+        """
+
+        '''
+        Here we unpack the data. Its structure depends on the mdoel and what is passed to 'fit()':
+        '''
         if isinstance(data, tuple):
-            data = data[0]
+            x = data[0]
+        else:
+            x = data
         # loss_fn = losses.BinaryCrossentropy(from_logits=False, label_smoothing=0)
 
         with tf.GradientTape() as tape:
             # Run the input 1D frequency vector through the auto-encoder:
-            latent_code = self.encoder(data)
+            latent_code = self.encoder(x)
             # Run the encoded latent representation through the decoder:
             reconstructed = self.decoder(latent_code)
-            # Compute the reconstruction error as a loss function:
-            loss = self.reconstruction_error(y_true=data, y_pred=reconstructed)
+            '''
+            Compute the loss value (the loss function is configured in 'compile()'):
+            '''
+            # With the auto-encoder, what is traditionally thought of as 'y' is the original 'x'. And what is
+            #  traditionally thought of as 'y_pred' is the 'reconstructed' x:
+            loss = self.compiled_loss(x, reconstructed, regularization_losses=self.losses)
 
         # Use the gradient tape to compute the gradients of the trainable variables with respect to the loss:
         gradients = tape.gradient(loss, self.trainable_variables)
-        # Run one step of gradient descent by updating the value of the variables to minimize the loss:
+        # Run one step of gradient descent by updating the value of the weights associated with the trainable variables
+        # to minimize the loss:
         self.optimizer.apply_gradients(grads_and_vars=zip(gradients, self.trainable_variables))
-        # Compute and retain the loss metric:
-        self._loss_tracker.update_state(values=loss)
-        return {'loss': self._loss_tracker.result()}
+        # Update the metrics (including the metric that tracks the loss):
+        self.compiled_metrics.update_state(x, reconstructed)
+        # Prepare a dictionary mapping metric names to current values:
+        metric_values = {m.name: m.result() for m in self.metrics}
+        # TODO: Here we manually overwrite the loss that is computed on the backend due to a loss of precision somehow
+        #  between the version computed by self.compiled_loss() and the version that is stored in self.metrics:
+        metric_values['loss'] = loss
+        return metric_values
 
-    @property
-    def metrics(self):
-        # see: https://www.tensorflow.org/guide/keras/customizing_what_happens_in_fit/#going_lower-level
-        return [self._loss_tracker]
+    # @property
+    # def metrics(self):
+    #     # see: https://www.tensorflow.org/guide/keras/customizing_what_happens_in_fit/#going_lower-level
+    #     return [self._loss_tracker]
 
 
 def main(args):
@@ -159,7 +183,7 @@ def main(args):
 
     # loss_tracker = metrics.Mean(name='loss')
     autoencoder = Autoencoder(latent_dim=latent_dim, original_dim=4097)
-    autoencoder.compile(optimizer='adam', loss=losses.MeanSquaredError(), metrics=metrics.RootMeanSquaredError())
+    autoencoder.compile(optimizer='adam', loss=losses.MeanSquaredError(), metrics=[metrics.RootMeanSquaredError()])
     autoencoder.build(input_shape=(batch_size, 4097))
     print(autoencoder.summary())
     # tensorboard callback for profiling training process:
@@ -169,19 +193,22 @@ def main(args):
         train_tf_record_ds: tf.data.TFRecordDataset = train_tf_record_loader.get_tf_record_dataset(
             batch_size=batch_size
         )
-        # steps_per_epoch: Total number of steps (batches of samples) before declaring one epoch finished and starting the next epoch.
+        # steps_per_epoch: Total number of steps (batches of samples) before declaring one epoch finished and starting
+        # the next epoch.
         autoencoder.fit(train_tf_record_ds, epochs=10, shuffle=False, steps_per_epoch=None)
     elif dataset_split_type == DatasetSplitType.VAL:
         val_tf_record_ds: tf.data.TFRecordDataset = val_tf_record_loader.get_tf_record_dataset(
             batch_size=batch_size
         )
-        # steps_per_epoch: Total number of steps (batches of samples) before declaring one epoch finished and starting the next epoch.
+        # steps_per_epoch: Total number of steps (batches of samples) before declaring one epoch finished and starting
+        # the next epoch.
         autoencoder.fit(val_tf_record_ds, epochs=10, shuffle=False, steps_per_epoch=None)
     elif dataset_split_type == DatasetSplitType.TEST:
         test_tf_record_ds: tf.data.TFRecordDataset = test_tf_record_loader.get_tf_record_dataset(
             batch_size=batch_size
         )
-        # steps_per_epoch: Total number of steps (batches of samples) before declaring one epoch finished and starting the next epoch.
+        # steps_per_epoch: Total number of steps (batches of samples) before declaring one epoch finished and starting
+        # the next epoch.
         autoencoder.fit(test_tf_record_ds, epochs=10, shuffle=False, steps_per_epoch=None)
     else:
         # DatasetSplitType == DatasetSplitType.ALL

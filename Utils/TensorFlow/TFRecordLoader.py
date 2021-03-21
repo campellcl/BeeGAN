@@ -65,9 +65,14 @@ class TFRecordLoader:
             num_parallel_reads=tf.data.experimental.AUTOTUNE
         )
         # De-serialize the DS of tf.train.Examples into tuple (tf.Tensor(tf.string), tf.Tensor(tf.float32 1D array)):
-        dataset = dataset.map(lambda x: self.deserialize_tf_record(serialized_tf_record=x))
+        dataset = dataset.map(
+            lambda x: self.deserialize_tf_record(serialized_tf_record=x),
+            num_parallel_calls=tf.data.AUTOTUNE
+        )
         # Pre-split the Dataset into batches for training:
-        dataset = dataset.batch(batch_size=batch_size)
+        # dataset = dataset.batch(batch_size=batch_size).prefetch(buffer_size=tf.data.AUTOTUNE).cache()
+        dataset = dataset.batch(batch_size=batch_size).prefetch(buffer_size=tf.data.AUTOTUNE)
+
         # A single item from the dataset is now a batch of tensors (dataset_batch_size x 1):
         # tf_example_batch = next(iter(dataset))
 
