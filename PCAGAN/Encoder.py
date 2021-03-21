@@ -77,7 +77,7 @@ class Autoencoder(tf.keras.Model):
     def train_step(self, data):
         if isinstance(data, tuple):
             data = data[0]
-        loss_fn = losses.BinaryCrossentropy(from_logits=False, label_smoothing=0)
+        # loss_fn = losses.BinaryCrossentropy(from_logits=False, label_smoothing=0)
 
         with tf.GradientTape() as tape:
             # Run the input 1D frequency vector through the auto-encoder:
@@ -138,31 +138,115 @@ def main(args):
         # tf.debugging.set_log_device_placement(True)
 
     # Obtain the TFRecord dataset corresponding to the requested dataset split ('train', 'val', 'test', 'all'):
-    tf_record_loader: TFRecordLoader = TFRecordLoader(
+    train_tf_record_loader: TFRecordLoader = TFRecordLoader(
       root_data_dir=root_data_dir,
-      dataset_split_type=dataset_split_type,
+      dataset_split_type=DatasetSplitType.TRAIN,
       is_debug=is_debug,
       order_deterministically=order_deterministically
     )
-    tf_record_ds: tf.data.TFRecordDataset = tf_record_loader.get_tf_record_dataset(
-      batch_size=batch_size
+    val_tf_record_loader: TFRecordLoader = TFRecordLoader(
+        root_data_dir=root_data_dir,
+        dataset_split_type=DatasetSplitType.VAL,
+        order_deterministically=order_deterministically,
+        is_debug=is_debug
+    )
+    test_tf_record_loader: TFRecordLoader = TFRecordLoader(
+        root_data_dir=root_data_dir,
+        dataset_split_type=DatasetSplitType.TEST,
+        order_deterministically=order_deterministically,
+        is_debug=is_debug
     )
 
     # loss_tracker = metrics.Mean(name='loss')
     autoencoder = Autoencoder(latent_dim=latent_dim, original_dim=4097)
-    autoencoder.compile(optimizer='adam', loss=losses.MeanSquaredError())
+    autoencoder.compile(optimizer='adam', loss=losses.MeanSquaredError(), metrics=metrics.RootMeanSquaredError())
     autoencoder.build(input_shape=(batch_size, 4097))
     print(autoencoder.summary())
     # tensorboard callback for profiling training process:
-    # tb_callback = tf.keras.callbacks.TensorBoard(log_dir=os.path.join(os.getcwd(), '../Output'), profile_batch='10, 15')
-    # autoencoder.fit(tf_record_ds, epochs=10, shuffle=False, steps_per_epoch=None, callbacks=[tb_callback])
+    tb_callback = tf.keras.callbacks.TensorBoard(log_dir=os.path.join(os.getcwd(), '../Output'), profile_batch='15, 30')
 
-    # steps_per_epcoh: Total number of steps (batches of samples) before declaring one epoch finished and starting the next epoch.
-    autoencoder.fit(tf_record_ds, epochs=10, shuffle=False, steps_per_epoch=None)
-
-    # autoencoder = SVDAutoencoder(latent_dim)
-    # autoencoder.compile(optimizer='adam', loss=losses.MeanSquaredError())
-    # autoencoder.fit(tf_record_ds, tf_record_ds, epochs=10, shuffle=False)
+    if dataset_split_type == DatasetSplitType.TRAIN:
+        train_tf_record_ds: tf.data.TFRecordDataset = train_tf_record_loader.get_tf_record_dataset(
+            batch_size=batch_size
+        )
+        # steps_per_epoch: Total number of steps (batches of samples) before declaring one epoch finished and starting the next epoch.
+        autoencoder.fit(train_tf_record_ds, epochs=10, shuffle=False, steps_per_epoch=None)
+    elif dataset_split_type == DatasetSplitType.VAL:
+        val_tf_record_ds: tf.data.TFRecordDataset = val_tf_record_loader.get_tf_record_dataset(
+            batch_size=batch_size
+        )
+        # steps_per_epoch: Total number of steps (batches of samples) before declaring one epoch finished and starting the next epoch.
+        autoencoder.fit(val_tf_record_ds, epochs=10, shuffle=False, steps_per_epoch=None)
+    elif dataset_split_type == DatasetSplitType.TEST:
+        test_tf_record_ds: tf.data.TFRecordDataset = test_tf_record_loader.get_tf_record_dataset(
+            batch_size=batch_size
+        )
+        # steps_per_epoch: Total number of steps (batches of samples) before declaring one epoch finished and starting the next epoch.
+        autoencoder.fit(test_tf_record_ds, epochs=10, shuffle=False, steps_per_epoch=None)
+    else:
+        # DatasetSplitType == DatasetSplitType.ALL
+        train_tf_record_ds: tf.data.TFRecordDataset = train_tf_record_loader.get_tf_record_dataset(
+            batch_size=batch_size
+        )
+        val_tf_record_ds: tf.data.TFRecordDataset = val_tf_record_loader.get_tf_record_dataset(
+            batch_size=batch_size
+        )
+        # test_tf_record_ds: tf.data.TFRecordDataset = test_tf_record_loader.get_tf_record_dataset(
+        #     batch_size=batch_size
+        # )
+        '''
+        Some of the below parameter choices for the .fit() function are not self explanatory, hence the rational for
+         those choices are described below as well as in the documentation (here 
+         https://www.tensorflow.org/api_docs/python/tf/keras/Model#fit).
+        :param batch_size: This parameter is set to None because we are using TFRecord datasets which dictate their own
+         batch size (in our case sourced from the command line arguments). 
+        :param shuffle: A boolean value indicates whether the training data should be shuffled before each epoch, or 
+         each batch. We already shuffle the data in the preprocessing step by permuting each of the TFRecord datasets
+         randomly. Hence, we do not shuffle the data again due to performance overhead.
+        :param steps_per_epoch: Total number of steps (batches of samples) before declaring one epoch finished and 
+         starting the next epoch. A value of None defaults to the number of samples in the dataset divided by the 
+         batch size of the dataset generator.
+        :param validation_steps: The total number of steps (batches of samples) to draw before stopping when performing
+         validation at the end of every epoch. We provide a value of None to indicate that validation should run until
+         the entire validation dataset has been leveraged.
+        :param validation_batch_size: We provide a value of None because we are using TFRecord datasets which dictate their own
+         batch size (in our case sourced from the command line arguments).
+        :param validation_freq: When provided as an integer, specifies how many training epochs to run before performing
+         a validation run. We specify with a value of 1 that the validation metrics should be computed after every 
+         training epoch. 
+        '''
+        if is_debug:
+            autoencoder.fit(
+                train_tf_record_ds,
+                batch_size=None,
+                epochs=10,
+                verbose=1,
+                callbacks=[tb_callback],
+                validation_data=val_tf_record_ds,
+                shuffle=False,
+                class_weight=None,
+                sample_weight=None,
+                steps_per_epoch=None,
+                validation_steps=None,
+                validation_batch_size=None,
+                validation_freq=1
+            )
+        else:
+            autoencoder.fit(
+                train_tf_record_ds,
+                batch_size=None,
+                epochs=10,
+                verbose=1,
+                callbacks=None,
+                validation_data=val_tf_record_ds,
+                shuffle=False,
+                class_weight=None,
+                sample_weight=None,
+                steps_per_epoch=None,
+                validation_steps=None,
+                validation_batch_size=None,
+                validation_freq=1
+            )
 
 
 if __name__ == '__main__':
