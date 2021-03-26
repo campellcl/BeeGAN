@@ -3,6 +3,7 @@ import argparse
 import tensorflow as tf
 from tensorflow.keras import layers, losses, activations, initializers, optimizers, metrics
 import kerastuner as kt
+from typing import Optional
 from Utils.EnumeratedTypes.DatasetSplitType import DatasetSplitType
 from Utils.TensorFlow.TFRecordLoader import TFRecordLoader
 
@@ -74,7 +75,7 @@ class Autoencoder(tf.keras.Model):
         """
 
         '''
-        Here we unpack the data. Its structure depends on the mdoel and what is passed to 'fit()':
+        Here we unpack the data. Its structure depends on the model and what is passed to 'fit()':
         '''
         if isinstance(data, tuple):
             x = data[0]
@@ -110,21 +111,36 @@ class Autoencoder(tf.keras.Model):
 
 
 class HyperAutoencoder(kt.HyperModel):
+    # see: https://github.com/keras-team/keras-tuner#you-can-use-a-hypermodel-subclass-instead-of-a-model-building-function
 
     def __init__(self):
         super().__init__()
 
-    def build(self, hp):
-
+    def build(self, hp) -> Autoencoder:
         # Tune the capacity (number of units/neurons) in the latent encoding (see: https://keras-team.github.io/keras-tuner/documentation/hyperparameters/):
         hp_num_units_latent_code = hp.Int('num_units_latent_code', min_value=1, max_value=20, step=1, default=1, sampling='linear')
-        autoencoder = Autoencoder(source_input_dim=4097, latent_dim=hp_num_units_latent_code)
+        autoencoder: Autoencoder = Autoencoder(source_input_dim=4097, latent_dim=hp_num_units_latent_code)
         autoencoder.compile(
             optimizer=optimizers.Adam(),
             loss=losses.MeanSquaredError(),
             metrics=[metrics.RootMeanSquaredError()]
         )
         return autoencoder
+
+
+class AutoencoderHyperparameterTuner(kt.Tuner):
+
+    def run_trial(self, trial, train_tf_record_ds: tf.data.TFRecordDataset, batch_size: Optional[int], epochs: int,
+                  verbose: int, validation_data: tf.data.TFRecordDataset, shuffle: bool, class_weight, sample_weight,
+                  steps_per_epoch: Optional[int], validation_steps: Optional[int], validation_batch_size: Optional[int],
+                  validation_freq: Optional[int]):
+        # Note: The method signature keyword parameters must match verbatim those provided in the AutoencoderHyperparameterTuner.search() invocation:
+        hp = trial.hyperparameters
+        model = self.hypermodel.build(hp)
+        metric_values: dict = model.train_step(data=train_tf_record_ds)
+        # score = metric_values['loss']
+        self.oracle.update_trial(trial_id=trial.trial_id, metrics=metric_values)
+        self.oracle.save_model(trial.trial_id, model)
 
 
 def main(args):
@@ -192,14 +208,27 @@ def main(args):
     # Hyper-parameter tuning wrapper for the auto-encoder provided via the Keras hyper-parameter tuner:
     autoencoder_hypermodel = HyperAutoencoder()
 
-    hyperparam_tuner = kt.Hyperband(
-        hypermodel=autoencoder_hypermodel,
-        objective='val_accuracy',
-        max_epochs=10,
-        hyperband_iterations=1,
-        seed=None
+    # hyperparam_tuner = kt.Hyperband(
+    #     hypermodel=autoencoder_hypermodel,
+    #     objective='val_accuracy',
+    #     max_epochs=10,
+    #     hyperband_iterations=2,
+    #     seed=None
+    # )
+    # hyperparam_tuner.search_space_summary()
+
+    random_search_oracle: kt.oracles.RandomSearch = kt.oracles.RandomSearch(
+        objective='loss',
+        max_trials=20,
+        seed=42
     )
-    hyperparam_tuner.search_space_summary()
+
+    hyperparam_tuner = AutoencoderHyperparameterTuner(
+        oracle=random_search_oracle,
+        hypermodel=autoencoder_hypermodel
+    )
+
+
 
     if dataset_split_type == DatasetSplitType.TRAIN:
         train_tf_record_ds: tf.data.TFRecordDataset = train_tf_record_loader.get_tf_record_dataset(
