@@ -7,6 +7,7 @@ from typing import Optional
 from Utils.EnumeratedTypes.DatasetSplitType import DatasetSplitType
 from Utils.TensorFlow.TFRecordLoader import TFRecordLoader
 
+# Autoencoders with Keras Tuner for hyperparameter optimization with subclassed kt.Tuner and kt.HyperModel
 
 class Encoder(layers.Layer):
 
