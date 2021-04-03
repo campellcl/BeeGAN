@@ -190,21 +190,21 @@ def main(args):
     tb_callback = tf.keras.callbacks.TensorBoard(log_dir=os.path.join(os.getcwd(), '../Output'), profile_batch='15, 30')
 
     if dataset_split_type == DatasetSplitType.TRAIN:
-        train_tf_record_ds: tf.data.TFRecordDataset = train_tf_record_loader.get_tf_record_dataset(
+        train_tf_record_ds: tf.data.TFRecordDataset = train_tf_record_loader.get_batched_tf_record_dataset(
             batch_size=batch_size
         )
         # steps_per_epoch: Total number of steps (batches of samples) before declaring one epoch finished and starting
         # the next epoch.
         autoencoder.fit(train_tf_record_ds, epochs=10, shuffle=False, steps_per_epoch=None)
     elif dataset_split_type == DatasetSplitType.VAL:
-        val_tf_record_ds: tf.data.TFRecordDataset = val_tf_record_loader.get_tf_record_dataset(
+        val_tf_record_ds: tf.data.TFRecordDataset = val_tf_record_loader.get_batched_tf_record_dataset(
             batch_size=batch_size
         )
         # steps_per_epoch: Total number of steps (batches of samples) before declaring one epoch finished and starting
         # the next epoch.
         autoencoder.fit(val_tf_record_ds, epochs=10, shuffle=False, steps_per_epoch=None)
     elif dataset_split_type == DatasetSplitType.TEST:
-        test_tf_record_ds: tf.data.TFRecordDataset = test_tf_record_loader.get_tf_record_dataset(
+        test_tf_record_ds: tf.data.TFRecordDataset = test_tf_record_loader.get_batched_tf_record_dataset(
             batch_size=batch_size
         )
         # steps_per_epoch: Total number of steps (batches of samples) before declaring one epoch finished and starting
@@ -212,10 +212,10 @@ def main(args):
         autoencoder.fit(test_tf_record_ds, epochs=10, shuffle=False, steps_per_epoch=None)
     else:
         # DatasetSplitType == DatasetSplitType.ALL
-        train_tf_record_ds: tf.data.TFRecordDataset = train_tf_record_loader.get_tf_record_dataset(
+        train_tf_record_ds: tf.data.TFRecordDataset = train_tf_record_loader.get_batched_tf_record_dataset(
             batch_size=batch_size
         )
-        val_tf_record_ds: tf.data.TFRecordDataset = val_tf_record_loader.get_tf_record_dataset(
+        val_tf_record_ds: tf.data.TFRecordDataset = val_tf_record_loader.get_batched_tf_record_dataset(
             batch_size=batch_size
         )
         # test_tf_record_ds: tf.data.TFRecordDataset = test_tf_record_loader.get_tf_record_dataset(
