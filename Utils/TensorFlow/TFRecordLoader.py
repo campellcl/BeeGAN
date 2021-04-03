@@ -1,8 +1,12 @@
 import argparse
 import os
-from typing import Tuple
+from typing import Tuple, Optional
 from Utils.EnumeratedTypes.DatasetSplitType import DatasetSplitType
 import tensorflow as tf
+import matplotlib.pyplot as plt
+import time
+import tensorflow_datasets as tfds
+import numpy as np
 
 
 class TFRecordLoader:
@@ -28,11 +32,62 @@ class TFRecordLoader:
         self._order_deterministically: bool = order_deterministically
         self.is_debug: bool = is_debug
 
-    def get_tf_record_dataset(self, batch_size: int) -> tf.data.TFRecordDataset:
+    def get_tf_record_dataset(self, prefetch: bool = True, cache: bool = False) -> tf.data.TFRecordDataset:
+        dataset: tf.data.TFRecordDataset
+        # Ensure the root_data_dir is valid:
+        if not os.path.isdir(self.root_data_dir):
+            raise FileNotFoundError('The provided root data directory: \'%s\' is invalid!' % self.root_data_dir)
+        # Get all TFRecord files belonging to the specified dataset split ('train', 'test', 'val', 'all'):
+        if self.dataset_split_type == DatasetSplitType.ALL:
+            file_pattern = os.path.join(self.root_data_dir, '*-*.tfrec')
+        else:
+            file_pattern = os.path.join(self.root_data_dir, '{}-*.tfrec'.format(self.dataset_split_type.value))
+        file_dataset = tf.data.Dataset.list_files(file_pattern=file_pattern)
+
+        # This boolean flag indicates whether the outputs from the dataset need to be produced in deterministic order
+        #   (see: https://www.tensorflow.org/api_docs/python/tf/data/Options). For optimal performance, enable this flag
+        # and read multiple files at once while disregarding the order of the data. If you plan to shuffle the data
+        # anyway, then it makes sense to consider reading non-deterministically.
+        tf_data_options = tf.data.Options()
+        tf_data_options.experimental_deterministic = self._order_deterministically
+        file_dataset = file_dataset.with_options(options=tf_data_options)
+
+        # Read the raw binary TFRecord files into a dataset:
+        dataset: tf.data.TFRecordDataset = tf.data.TFRecordDataset(
+            filenames=file_dataset,
+            compression_type='ZLIB',
+            num_parallel_reads=tf.data.experimental.AUTOTUNE
+        )
+        # De-serialize the DS of tf.train.Examples into tuple (tf.Tensor(tf.string), tf.Tensor(tf.float32 1D array)):
+        dataset = dataset.map(
+            lambda x: self.deserialize_tf_record(serialized_tf_record=x),
+            num_parallel_calls=tf.data.AUTOTUNE
+        )
+        if prefetch:
+            if cache:
+                dataset = dataset.prefetch(buffer_size=tf.data.AUTOTUNE).cache()
+            else:
+                dataset = dataset.prefetch(buffer_size=tf.data.AUTOTUNE)
+        else:
+            if cache:
+                dataset = dataset.cache()
+            else:
+                pass
+        return dataset
+
+    def get_batched_tf_record_dataset(self, batch_size: int, prefetch: bool = True, cache: bool = False) -> tf.data.TFRecordDataset:
         """
-        get_tf_record_dataset: Retrieves the tf.data.TFRecordDataset object for the specified dataset split (e.g.
+        get_batched_tf_record_dataset: Retrieves the tf.data.TFRecordDataset object for the specified dataset split (e.g.
          'train', 'test', 'val', 'all').
         :param batch_size: <int> The batch size that the iterator of the dataset should yield in each step.
+        :param prefetch: <bool> A boolean flag indicating if prefetching should be enabled. Prefetching allows later
+         elements to be prepared while the current element is being processed. This often improves latency and
+         throughput, at the cost of using additional memory to store prefetched elements (see:
+         https://www.tensorflow.org/api_docs/python/tf/data/Dataset#prefetch).
+        :param cache: <bool> A boolean flag indicating if elements in the dataset should be cached to memory. WARNING:
+         Do not attempt to cache datasets that have a size larger than GPU memory, in memory; instead modify this method
+         to accept a filename to cache to, and take over clearing the cache on subsequent iterations (see:
+          https://www.tensorflow.org/api_docs/python/tf/data/Dataset#cache).
         :return dataset: <tf.data.TFRecordDataset> A tf.data.TFRecordDataset (see:
          https://www.tensorflow.org/tutorials/load_data/tfrecord) which is the recommended data storage format for
          Tensorflow 2.0 with datasets that will not fit into memory (see:
@@ -70,8 +125,17 @@ class TFRecordLoader:
             num_parallel_calls=tf.data.AUTOTUNE
         )
         # Pre-split the Dataset into batches for training:
-        # dataset = dataset.batch(batch_size=batch_size).prefetch(buffer_size=tf.data.AUTOTUNE).cache()
-        dataset = dataset.batch(batch_size=batch_size).prefetch(buffer_size=tf.data.AUTOTUNE)
+        # NOTE: The dataset does not fit into memory so we cannot cache it using the native tf.Dataset method .cache():
+        if cache:
+            if prefetch:
+                dataset = dataset.batch(batch_size=batch_size, drop_remainder=True).cache().prefetch(buffer_size=tf.data.AUTOTUNE)
+            else:
+                dataset = dataset.batch(batch_size=batch_size, drop_remainder=True).cache()
+        else:
+            if prefetch:
+                dataset = dataset.batch(batch_size=batch_size, drop_remainder=True).prefetch(buffer_size=tf.data.AUTOTUNE)
+            else:
+                dataset = dataset.batch(batch_size=batch_size, drop_remainder=True)
 
         # A single item from the dataset is now a batch of tensors (dataset_batch_size x 1):
         # tf_example_batch = next(iter(dataset))
@@ -133,12 +197,12 @@ class TFRecordLoader:
         The ISO_8601 string was serialized as a list of bytes in order to store it in the TFRecord format. We now need to
          convert that list of bytes back into a tf.string object:
         '''
-        iso_8601_bytes_list_tensor: tf.Tensor = read_example['iso_8601']
-        iso_8601_tensor: tf.Tensor = tf.io.parse_tensor(
-            serialized=iso_8601_bytes_list_tensor,
-            out_type=tf.string,
-            name='iso_8601'
-        )
+        # iso_8601_bytes_list_tensor: tf.Tensor = read_example['iso_8601']
+        # iso_8601_tensor: tf.Tensor = tf.io.parse_tensor(
+        #     serialized=iso_8601_bytes_list_tensor,
+        #     out_type=tf.string,
+        #     name='iso_8601'
+        # )
         # The https://www.tensorflow.org/tutorials/load_data/unicode#the_tfstring_data_type by default stores the string in
         #   numpy as a binary encoding of the UTF-8 character representation. To decode the byte representation into UTF-8
         #   character codes we can optionally do:
@@ -155,6 +219,47 @@ class TFRecordLoader:
             name='frequencies'
         )
         return frequencies_tensor, frequencies_tensor
+
+    @staticmethod
+    def benchmark_dataset(ds: tf.data.Dataset, batch_size):
+        tfds_benchmark = tfds.core.benchmark(ds=ds, num_iter=1, batch_size=batch_size)
+        return tfds_benchmark
+
+    # @staticmethod
+    # def plot_batch_sizes(ds: tf.data.Dataset):
+    #     # tf_example_batch = next(iter(ds))
+    #     # spectrogram_tensor_batch = tf_example_batch[1]
+    #
+    #     for batch in ds:
+    #         freqs = batch[0]
+    #
+    #
+    #     # batch_sizes = [batch[0].shape[0] for batch in ds]
+    #     # plt.bar(range(len(batch_sizes)), batch_sizes)
+    #     # plt.xlabel('Batch number')
+    #     # plt.ylabel('Batch size')
+
+    @staticmethod
+    def attempt_to_load_entire_dataset_into_memory(ds: tf.data.Dataset, batch_size: Optional[int]):
+        """
+
+        :param ds:
+        :param batch_size: <int/None> Only provide the batch size if the input tf.data.Dataset is already pre-batched
+         (e.g. has had .batch(...) called on it). Be sure to provide the same batch size that was used during the
+         initial batching.
+        :return:
+        """
+
+        # if batch_size is not None:
+        #     num_batches = 0
+        #     ds = ds.as_numpy_iterator()
+        #     for i, (x_0, x_1) in enumerate(ds):
+        #
+        #         num_batches += 1
+        # else:
+        ds = ds.batch(-1, drop_remainder=True)
+        in_mem: np.ndarray = np.ndarray(ds.as_numpy_iterator())
+        print('Dataset shape in memory: %s' % (in_mem.shape,))
 
 
 def main(args):
@@ -195,7 +300,7 @@ def main(args):
         order_deterministically=order_deterministically,
         is_debug=is_debug
     )
-    dataset = tf_record_loader.get_tf_record_dataset(
+    dataset = tf_record_loader.get_batched_tf_record_dataset(
         batch_size=dataset_batch_size
     )
     # A single item from the dataset is now a batch of tensors (dataset_batch_size x 1):
