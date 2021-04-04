@@ -143,7 +143,7 @@ def main(args):
     f = rfftfreq(8192, 1/8000)
     max_idx = np.argmax(mean_spectra)
     plt.plot(f, mean_spectra)
-    print('f max-idx: %s' % f[max_idx])
+    print('frequency bin centers max-idx (in Hz): %s' % f[max_idx])
     plt.show()
 
     # TODO: Benchmarking does not appear to work here via tfds:

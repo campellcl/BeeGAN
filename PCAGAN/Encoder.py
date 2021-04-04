@@ -1,9 +1,11 @@
 import os
+import sys
 import argparse
 import tensorflow as tf
 from tensorflow.keras import layers, losses, activations, initializers, optimizers, metrics
 from Utils.EnumeratedTypes.DatasetSplitType import DatasetSplitType
 from Utils.TensorFlow.TFRecordLoader import TFRecordLoader
+import numpy as np
 
 latent_dim = 1
 
@@ -42,7 +44,7 @@ class Decoder(layers.Layer):
             activation=activations.linear,
             use_bias=True,
             kernel_initializer=initializers.RandomNormal(mean=0.0, stddev=0.05, seed=None),
-            bias_initializer=initializers.zeros,
+            bias_initializer=initializers.zeros(),
             kernel_regularizer=None,
             bias_regularizer=None,
             activity_regularizer=None,
@@ -63,6 +65,13 @@ class Autoencoder(tf.keras.Model):
         self.decoder = Decoder(output_dim=original_dim)
 
     def call(self, x, **kwargs):
+        '''
+        Here we unpack the data. Its structure depends on the model and what is passed to 'fit()':
+        '''
+        if isinstance(x, tuple):
+            x = x[0]
+        else:
+            pass
         latent_code = self.encoder(x)
         reconstructed = self.decoder(latent_code)
         return reconstructed
@@ -80,12 +89,13 @@ class Autoencoder(tf.keras.Model):
     def train_step(self, data):
         """
         train_step: TODO: Docstrings.
+        see: https://www.tensorflow.org/guide/keras/customizing_what_happens_in_fit/#introduction
         :param data:
         :return:
         """
 
         '''
-        Here we unpack the data. Its structure depends on the mdoel and what is passed to 'fit()':
+        Here we unpack the data. Its structure depends on the model and what is passed to 'fit()':
         '''
         if isinstance(data, tuple):
             x = data[0]
@@ -119,6 +129,30 @@ class Autoencoder(tf.keras.Model):
         metric_values['loss'] = loss
         return metric_values
 
+    def test_step(self, data):
+        """
+        see: https://www.tensorflow.org/guide/keras/customizing_what_happens_in_fit/#providing_your_own_evaluation_step
+        :param data:
+        :return:
+        """
+        '''
+        Here we unpack the data. Its structure depends on the model and what is passed to 'fit()':
+        '''
+        if isinstance(data, tuple):
+            x = data[0]
+        else:
+            x = data
+        # Recall that with the auto-encoder, what is usually 'y' is the original 'x'. And what is usually 'y_pred' is
+        # the 'reconstructed' version of 'x':
+        x_reconstructed = self(x, training=False)
+        # Update the metrics tracking the loss on the validation and/or testing set:
+        self.compiled_loss(x, x_reconstructed, regularization_losses=self.losses)
+        # Update additional non-loss metrics specified during model compile time:
+        self.compiled_metrics.update_state(x, x_reconstructed)
+        # Return the dictionary mapping metric names to their current (just updated) values. Note that this will include
+        # the loss metric tracked in self.metrics:
+        return {m.name: m.result() for m in self.metrics}
+
     # @property
     # def metrics(self):
     #     # see: https://www.tensorflow.org/guide/keras/customizing_what_happens_in_fit/#going_lower-level
@@ -129,7 +163,9 @@ def main(args):
     # Command line arguments:
     is_debug: bool = args.is_verbose
     root_data_dir: str = args.root_data_dir[0]
+    output_data_dir: str = args.output_data_dir[0]
     batch_size: int = args.batch_size
+    num_epochs: int = args.num_epochs
     dataset_split_str: str = args.dataset_split_str[0]
     order_deterministically: bool = args.order_deterministically
 
@@ -139,9 +175,8 @@ def main(args):
     cwd = os.getcwd()
     if not os.path.isdir(root_data_dir):
         raise FileNotFoundError('The provided root data directory \'%s\' is invalid!' % root_data_dir)
-    else:
-        os.chdir(root_data_dir)
-    os.chdir(cwd)
+    if not os.path.isdir(output_data_dir):
+        raise FileNotFoundError('The provided output data directory \'%s\' is invalid!' % output_data_dir)
     # Ensure the provided dataset split can be parsed:
     if dataset_split_str == DatasetSplitType.TRAIN.value:
         dataset_split_type = DatasetSplitType.TRAIN
@@ -186,8 +221,12 @@ def main(args):
     autoencoder.compile(optimizer='adam', loss=losses.MeanSquaredError(), metrics=[metrics.RootMeanSquaredError()])
     autoencoder.build(input_shape=(batch_size, 4097))
     print(autoencoder.summary())
-    # tensorboard callback for profiling training process:
-    tb_callback = tf.keras.callbacks.TensorBoard(log_dir=os.path.join(os.getcwd(), '../Output'), profile_batch='15, 30')
+
+    if is_debug:
+        # tensorboard callback for profiling training process:
+        tb_callback = tf.keras.callbacks.TensorBoard(log_dir=os.path.join(os.getcwd(), '../Output'), profile_batch='15, 30')
+    else:
+        tb_callback = None
 
     if dataset_split_type == DatasetSplitType.TRAIN:
         train_tf_record_ds: tf.data.TFRecordDataset = train_tf_record_loader.get_batched_tf_record_dataset(
@@ -195,21 +234,21 @@ def main(args):
         )
         # steps_per_epoch: Total number of steps (batches of samples) before declaring one epoch finished and starting
         # the next epoch.
-        autoencoder.fit(train_tf_record_ds, epochs=10, shuffle=False, steps_per_epoch=None)
+        autoencoder.fit(train_tf_record_ds, epochs=num_epochs, shuffle=False, steps_per_epoch=None)
     elif dataset_split_type == DatasetSplitType.VAL:
         val_tf_record_ds: tf.data.TFRecordDataset = val_tf_record_loader.get_batched_tf_record_dataset(
             batch_size=batch_size
         )
         # steps_per_epoch: Total number of steps (batches of samples) before declaring one epoch finished and starting
         # the next epoch.
-        autoencoder.fit(val_tf_record_ds, epochs=10, shuffle=False, steps_per_epoch=None)
+        autoencoder.fit(val_tf_record_ds, epochs=num_epochs, shuffle=False, steps_per_epoch=None)
     elif dataset_split_type == DatasetSplitType.TEST:
         test_tf_record_ds: tf.data.TFRecordDataset = test_tf_record_loader.get_batched_tf_record_dataset(
             batch_size=batch_size
         )
         # steps_per_epoch: Total number of steps (batches of samples) before declaring one epoch finished and starting
         # the next epoch.
-        autoencoder.fit(test_tf_record_ds, epochs=10, shuffle=False, steps_per_epoch=None)
+        autoencoder.fit(test_tf_record_ds, epochs=num_epochs, shuffle=False, steps_per_epoch=None)
     else:
         # DatasetSplitType == DatasetSplitType.ALL
         train_tf_record_ds: tf.data.TFRecordDataset = train_tf_record_loader.get_batched_tf_record_dataset(
@@ -246,7 +285,7 @@ def main(args):
             autoencoder.fit(
                 train_tf_record_ds,
                 batch_size=None,
-                epochs=10,
+                epochs=num_epochs,
                 verbose=1,
                 callbacks=[tb_callback],
                 validation_data=val_tf_record_ds,
@@ -262,7 +301,7 @@ def main(args):
             autoencoder.fit(
                 train_tf_record_ds,
                 batch_size=None,
-                epochs=10,
+                epochs=num_epochs,
                 verbose=1,
                 callbacks=None,
                 validation_data=val_tf_record_ds,
@@ -274,15 +313,28 @@ def main(args):
                 validation_batch_size=None,
                 validation_freq=1
             )
+        # Save the trained model:
+        autoencoder.save(filepath=os.path.join(output_data_dir, 'SavedModel'), overwrite=True, include_optimizer=True)
+        # x_val_batch = next(iter(val_tf_record_ds))
+        x_pred = autoencoder.predict(val_tf_record_ds, verbose=1)
+        # Load and reconstruct the serialized model to assert they are the same:
+        reconstructed_model = tf.keras.models.load_model(os.path.join(output_data_dir, 'SavedModel'))
+        # Run a prediction using the reconstructed model and assert they are the same:
+        reconstructed_model_x_pred = reconstructed_model.predict(val_tf_record_ds, verbose=1)
+        # Now assert relative equality between the in-memory version and the reconstructed model:
+        np.testing.assert_allclose(x_pred, reconstructed_model_x_pred)
+        sys.exit(0)
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Autoencoder argument parser.')
     parser.add_argument('-v', '--verbose', action='store_true', dest='is_verbose', required=False)
     parser.add_argument('--root-data-dir', type=str, nargs=1, action='store', dest='root_data_dir', required=True)
+    parser.add_argument('--output-data-dir', type=str, nargs=1, action='store', dest='output_data_dir', required=True)
     parser.add_argument('--dataset-split', type=str, nargs=1, action='store', dest='dataset_split_str', required=True,
                         help='The dataset split that should be loaded (e.g. train, test, val, or all).')
     parser.add_argument('--batch-size', type=int, action='store', dest='batch_size', required=True)
+    parser.add_argument('--num-epochs', type=int, action='store', dest='num_epochs', required=True)
     parser.add_argument('--order-deterministically', type=bool, action='store', dest='order_deterministically',
                         required=True)
     command_line_args = parser.parse_args()
