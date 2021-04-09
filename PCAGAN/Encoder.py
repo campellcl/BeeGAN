@@ -7,15 +7,13 @@ from Utils.EnumeratedTypes.DatasetSplitType import DatasetSplitType
 from Utils.TensorFlow.TFRecordLoader import TFRecordLoader
 import numpy as np
 
-latent_dim = 1
-
 
 class Encoder(layers.Layer):
 
-    def __init__(self, original_dim: int, latent_dim: int):
+    def __init__(self, input_dim: int, latent_dim: int):
         super(Encoder, self).__init__()
         self.encoder = layers.Dense(
-            input_shape=(1, 4097),
+            input_shape=(1, input_dim),
             units=latent_dim,
             activation=activations.linear,
             use_bias=False,
@@ -36,11 +34,11 @@ class Encoder(layers.Layer):
 
 class Decoder(layers.Layer):
 
-    def __init__(self, output_dim: int, **kwargs):
+    def __init__(self, latent_dim: int, output_dim: int, **kwargs):
         super(Decoder, self).__init__(**kwargs)
         self.output_layer = layers.Dense(
             units=output_dim,
-            input_shape=(1,),
+            input_shape=(latent_dim,),
             activation=activations.linear,
             use_bias=True,
             kernel_initializer=initializers.RandomNormal(mean=0.0, stddev=0.05, seed=None),
@@ -59,10 +57,10 @@ class Decoder(layers.Layer):
 
 class Autoencoder(tf.keras.Model):
 
-    def __init__(self, latent_dim, original_dim):
+    def __init__(self, latent_dim: int, input_dim: int):
         super(Autoencoder, self).__init__()
-        self.encoder = Encoder(original_dim=original_dim, latent_dim=latent_dim)
-        self.decoder = Decoder(output_dim=original_dim)
+        self.encoder = Encoder(input_dim=input_dim, latent_dim=latent_dim)
+        self.decoder = Decoder(latent_dim=latent_dim, output_dim=input_dim)
 
     def call(self, x, **kwargs):
         '''
@@ -169,6 +167,9 @@ def main(args):
     dataset_split_str: str = args.dataset_split_str[0]
     order_deterministically: bool = args.order_deterministically
 
+    # TODO: wrap this value in hyper-parameter gird search:
+    latent_dim = 1
+
     dataset_split_type: DatasetSplitType
 
     # Ensure that the provided arguments are valid:
@@ -217,7 +218,7 @@ def main(args):
     )
 
     # loss_tracker = metrics.Mean(name='loss')
-    autoencoder = Autoencoder(latent_dim=latent_dim, original_dim=4097)
+    autoencoder = Autoencoder(latent_dim=latent_dim, input_dim=4097)
     autoencoder.compile(optimizer='adam', loss=losses.MeanSquaredError(), metrics=[metrics.RootMeanSquaredError()])
     autoencoder.build(input_shape=(batch_size, 4097))
     print(autoencoder.summary())
