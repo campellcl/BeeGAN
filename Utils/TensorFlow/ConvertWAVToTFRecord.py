@@ -20,7 +20,7 @@ from Utils.DatetimeUtils import DatetimeUtils
 
 
 _DEFAULT_AUDIO_DURATION = 60     # seconds
-_DEFAULT_SAMPLE_RATE = 8000     # 8 khz
+_DEFAULT_SAMPLE_RATE = 8000     # 8 hz
 _DEFAULT_SEED = 42
 _DEFAULT_TEST_SIZE = .20        # 20%
 _DEFAULT_VAL_SIZE = .20         # 20%
@@ -631,7 +631,7 @@ class ConvertWAVToTFRecord:
         # Use the default number of points to overlap (Tukey window) as:
         # num_points_to_overlap: int = num_per_segment // 8
         freqs, time_segs, spectrogram = signal.spectrogram(
-            audio_sample, nperseg=num_per_segment, fs=self.sample_rate, mode='magnitude'
+            audio_sample, nperseg=num_per_segment, window='tukey', fs=self.sample_rate, mode='magnitude'
         )
         return freqs, time_segs, spectrogram
 
