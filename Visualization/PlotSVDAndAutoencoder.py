@@ -63,7 +63,7 @@ def main(args):
     # Takes (n=window_length, d=sample spacing (inverse of sampling rate)):
     freq_bin_centers = rfftfreq(window_length, 1/original_sample_rate_in_hz)
 
-    plt.plot(freq_bin_centers, singular_vector, label='Singular Vector')
+    plt.plot(freq_bin_centers, singular_vector, label='Singular Vector', color='tab:green')
     plt.title('Frequency Bins vs. Singular Vector (Closed Form SVD) [%s]' % dataset_split_type)
     plt.ylabel('Singular Vector')
     plt.xlabel('Frequency Bins')
@@ -73,14 +73,15 @@ def main(args):
     plt.title('Frequency Bins vs. Trained Encoder\'s Weights (1 unit) [%s]' % dataset_split_type)
     plt.ylabel('Encoder Weights')
     plt.xlabel('Frequency Bins')
-    plt.plot(freq_bin_centers, weights_encoder, label='Encoder Weights')
+    plt.plot(freq_bin_centers, weights_encoder, label='Encoder Weights', color='tab:red')
     plt.show()
 
     plt.clf()
     plt.title('Frequency Bins vs. Trained Decoder\'s Weights (1 unit) [%s]' % dataset_split_type)
     plt.ylabel('Decoder Weights')
     plt.xlabel('Frequency Bins')
-    plt.plot(freq_bin_centers, weights_decoder, label='Decoder Weights')
+    plt.plot(freq_bin_centers, weights_decoder, label='Decoder Weights', color='tab:blue')
+    plt.show()
 
     # plt.clf()
     # fig, ax1 = plt.subplots()
@@ -107,11 +108,11 @@ def main(args):
     plt.title('Frequency Bins vs. Encoding/SVD (Closed Form) [%s]' % dataset_split_type)
     plt.ylabel('Encoder/Decoder Weights & Singular Vector')
     plt.xlabel('Frequency Bins')
-    plt.plot(freq_bin_centers, singular_vector, label='Singular Vector')
-    plt.plot(freq_bin_centers, weights_encoder, label='Encoder Weights', alpha=0.2)
-    plt.plot(freq_bin_centers, weights_decoder, label='Decoder Weights', alpha=0.2)
+    plt.plot(freq_bin_centers, singular_vector, label='Singular Vector', alpha=1.0, color='tab:green')
+    plt.plot(freq_bin_centers, weights_encoder, label='Encoder Weights', alpha=0.5, color='tab:red')
+    plt.plot(freq_bin_centers, weights_decoder, label='Decoder Weights', alpha=0.5, color='tab:blue')
     geometric_mean = np.sqrt(np.multiply(weights_encoder, weights_decoder))
-    plt.plot(freq_bin_centers, geometric_mean, label='Geometric Mean', alpha=1.0)
+    plt.plot(freq_bin_centers, geometric_mean, label='Geometric Mean', alpha=0.5, color='tab:purple')
     plt.legend()
     plt.show()
 
