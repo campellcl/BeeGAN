@@ -22,9 +22,9 @@ class Encoder(layers.Layer):
             kernel_regularizer=None,
             bias_regularizer=None,
             activity_regularizer=None,
-            kernel_constraint=None,
             bias_constraint=None,
-            name='encoder'
+            name='encoder',
+            kernel_constraint=tf.keras.constraints.unit_norm(axis=0)
         )
 
     def call(self, inputs, **kwargs):
@@ -40,13 +40,13 @@ class Decoder(layers.Layer):
             units=output_dim,
             input_shape=(latent_dim,),
             activation=activations.linear,
-            use_bias=True,
+            use_bias=False,
             kernel_initializer=initializers.RandomNormal(mean=0.0, stddev=0.05, seed=None),
-            bias_initializer=initializers.zeros(),
+            bias_initializer=None,
             kernel_regularizer=None,
             bias_regularizer=None,
             activity_regularizer=None,
-            kernel_constraint=None,
+            # kernel_constraint=tf.keras.constraints.unit_norm(axis=0),
             bias_constraint=None,
             name='decoder'
         )
@@ -199,10 +199,10 @@ def main(args):
 
     # Obtain the TFRecord dataset corresponding to the requested dataset split ('train', 'val', 'test', 'all'):
     train_tf_record_loader: TFRecordLoader = TFRecordLoader(
-      root_data_dir=root_data_dir,
-      dataset_split_type=DatasetSplitType.TRAIN,
-      is_debug=is_debug,
-      order_deterministically=order_deterministically
+        root_data_dir=root_data_dir,
+        dataset_split_type=DatasetSplitType.TRAIN,
+        is_debug=is_debug,
+        order_deterministically=order_deterministically
     )
     val_tf_record_loader: TFRecordLoader = TFRecordLoader(
         root_data_dir=root_data_dir,
@@ -225,7 +225,8 @@ def main(args):
 
     if is_debug:
         # tensorboard callback for profiling training process:
-        tb_callback = tf.keras.callbacks.TensorBoard(log_dir=os.path.join(os.getcwd(), '../Output'), profile_batch='15, 30')
+        tb_callback = tf.keras.callbacks.TensorBoard(log_dir=os.path.join(os.getcwd(), '../Output'),
+                                                     profile_batch='15, 30')
     else:
         tb_callback = None
 
