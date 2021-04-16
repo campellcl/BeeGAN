@@ -7,9 +7,11 @@ import numpy as np
 import tensorflow as tf
 from PCAGAN.Encoder import Autoencoder
 from typing import Optional, Union
+from tensorflow.keras import layers, losses, activations, initializers, optimizers, metrics
 
 DEFAULT_NUM_SAMPLES_FOR_TEST = 30000   # IMPORTANT: You must manually verify this amount of 32-bit float samples will
 # fit on the system dedicated GPU memory.
+DEFAULT_NUM_EPOCHS = 10
 
 
 def determine_num_samples_in_dataset(dataset: tf.data.Dataset, dataset_split_type: DatasetSplitType) -> int:
@@ -40,11 +42,15 @@ def main(args):
     is_debug: bool = args.is_verbose
     root_data_dir: str = args.root_data_dir[0]
     output_data_dir: str = args.output_data_dir[0]
-    batch_size: int = args.batch_size
+    train_batch_size: int = args.train_batch_size
     order_deterministically: bool = args.order_deterministically
     num_samples_train_set: Optional[int] = args.num_samples_train_set
     num_samples_val_set: Optional[int] = args.num_samples_val_set
     num_samples_test_set: Optional[int] = args.num_samples_test_set
+    num_samples_for_test: int = args.num_samples_for_test
+    num_frequency_bins: int = args.num_freq_bins    # 4097 by default.
+    num_units_latent_space: int = args.num_units_latent_space   # 1 by default.
+    num_epochs: int = args.num_epochs
 
     dataset_split_type: DatasetSplitType
 
@@ -106,52 +112,94 @@ def main(args):
     #         dataset=test_tf_record_ds,
     #         dataset_split_type=DatasetSplitType.TEST
     #     )
-    # Determine the maximum number of batch sizes we can iterate over and still have enough memory to compute closed
-    # form SVD:
-    # if num_samples_train_set > DEFAULT_NUM_SAMPLES_FOR_TEST:
-    #     max_num_batches_for_training_to_fit_in_mem: int = DEFAULT_NUM_SAMPLES_FOR_TEST // batch_size
-    #     # Now we have the number of batches we can train on to still compute a comparable closed form solution in memory.
-    #     num_elements_for_training_and_svd: int = max_num_batches_for_training_to_fit_in_mem * batch_size
-    # else:
-    #     max_num_batches_for_training_to_fit_in_mem: int = num_samples_train_set // batch_size
-    #     num_elements_for_training_and_svd: int = num_samples_train_set
 
-    # Read the data into memory for SVD:
+    # Construct a placeholder tensor to store training data in memory for SVD:
     x_train: tf.Tensor = tf.zeros(
-        shape=(DEFAULT_NUM_SAMPLES_FOR_TEST, 4097),
+        shape=(num_samples_for_test, 4097),
         dtype=tf.dtypes.float32,
         name='x_train_mem'
     )
 
     # Convert the dataset iterator into a batch iterator and retrieve the entire x_train at once:
-    train_tf_record_ds = train_tf_record_loader.get_batched_tf_record_dataset(batch_size=DEFAULT_NUM_SAMPLES_FOR_TEST, prefetch=False, cache=False)
+    train_tf_record_ds = train_tf_record_loader.get_batched_tf_record_dataset(
+        batch_size=num_samples_for_test, prefetch=False, cache=False
+    )
 
     # Now get the single batch from the dataset:
     x_0, _ = next(iter(train_tf_record_ds))
     # Assign it to a tensor in memory:
     x_train = tf.add(x_train, x_0, name='x_train')
+    # Normalize each row so that they sum to one:
+    row_norm = np.linalg.norm(x_train.numpy(), axis=1).reshape((-1, 1))
+    x_train = tf.divide(x_train, row_norm)
+    # x_train = tf.multiply(x_train, 100)
     # De-allocate the tf.dataset from memory:
     del train_tf_record_ds
-    # TODO: Write the training data to a numpy file:
-
-
-    # # x_train: tf.Tensor
-    # x_train_write_idx: int = 0
-    # for i in range(max_num_batches_for_training_to_fit_in_mem):
-    #     x_0, _ = next(iter(train_tf_record_ds))
-    #     # Populate a subset of x_train tensor with the new batch read in from the dataset iterator:
-    #     # indices = tf.constant(value=[m for m in ])
-    #     if i == 0:
-    #         x_train = x_0
-    #     else:
-    #         x_train = tf.stack([x_train, x_0])
-
+    # TODO: Write the training data to a numpy file if too large to keep in mem.
     print('Computing closed form SVD solution on dataset (%s) a subset of %d total samples...'
-          % (DatasetSplitType.TRAIN, DEFAULT_NUM_SAMPLES_FOR_TEST))
+          % (DatasetSplitType.TRAIN.value, DEFAULT_NUM_SAMPLES_FOR_TEST))
     s, u, v = tf.linalg.svd(x_train, full_matrices=False, compute_uv=True, name='SVD')
     print('s shape: %s' % (s.shape,))
     print('u shape: %s' % (u.shape,))
     print('v shape: %s' % (v.shape,))
+    # TODO: Serialize the resulting singular vectors to disk if too large to keep in mem.
+    # Now train an autoencoder on the same in-memory data:
+    autoencoder = Autoencoder(input_dim=num_frequency_bins, latent_dim=num_units_latent_space)
+    autoencoder.compile(optimizer=optimizers.Adam(learning_rate=0.001), loss=losses.MeanSquaredError(), metrics=[metrics.RootMeanSquaredError()])
+    autoencoder.build(input_shape=(train_batch_size, num_frequency_bins))
+    print(autoencoder.summary())
+
+    if is_debug:
+        # TODO: Enable any TensorBoard callbacks for debugging here.
+        pass
+
+    # train_tf_record_ds: tf.data.TFRecordDataset = train_tf_record_loader.get_batched_tf_record_dataset(
+    #     batch_size=train_batch_size,
+    #     prefetch=True,
+    #     cache=True
+    # )
+    # val_tf_record_ds: tf.data.TFRecordDataset = val_tf_record_loader.get_batched_tf_record_dataset(
+    #     batch_size=train_batch_size,
+    #     prefetch=True,
+    #     cache=True
+    # )
+    autoencoder.fit(
+        x_train,
+        batch_size=train_batch_size,
+        epochs=num_epochs,
+        verbose=1,
+        callbacks=None,
+        validation_data=None,
+        shuffle=False,
+        class_weight=None,
+        steps_per_epoch=None,
+        validation_steps=None,
+        validation_batch_size=None,
+        validation_freq=1
+    )
+    print('Trained!')
+    encoder = autoencoder.layers[0]
+    decoder = autoencoder.layers[1]
+
+    # Get the latent encoding (the kernel/filter of the decoder):
+    weights_encoder: tf.Variable = encoder.weights[0]
+    weights_decoder: tf.Variable = decoder.weights[0]
+
+    # Save the weights (encoder) to disk:
+    output_path: str = os.path.join(output_data_dir, 'WeightsEncoder-train-%d.npy' % num_samples_for_test)
+    np.save(output_path, weights_encoder.numpy().flatten())
+
+    # Save the weights (decoder) to disk:
+    output_path: str = os.path.join(output_data_dir, 'WeightsDecoder-train-%d.npy' % num_samples_for_test)
+    np.save(output_path, weights_decoder.numpy().flatten())
+
+    # Save the closed form SVD solution to disk:
+    output_path: str = os.path.join(output_data_dir, 'SingularVector-train-%d.npy' % num_samples_for_test)
+    right_singular_vector = v[:, 0]
+    np.save(output_path, right_singular_vector)
+
+    # Display the result to the user with an assertion:
+    np.testing.assert_allclose(right_singular_vector, weights_encoder.numpy().flatten())
     sys.exit(0)
 
 
@@ -162,11 +210,28 @@ if __name__ == '__main__':
     parser.add_argument('--order-deterministically', type=bool, action='store', dest='order_deterministically',
                         required=True)
     parser.add_argument('--output-data-dir', type=str, nargs=1, action='store', dest='output_data_dir', required=True)
-    # TODO: Add warning that the batch size will be used to compute the
-    parser.add_argument('--batch-size', type=int, action='store', dest='batch_size', required=True)
+    parser.add_argument('--train-batch-size', type=int, action='store', dest='train_batch_size', required=True,
+                        help='The batch size for use during the training of the Autoencoder.')
+    parser.add_argument(
+        '--num-samples-for-test', type=int, action='store', dest='num_samples_for_test', required=False,
+        default=DEFAULT_NUM_SAMPLES_FOR_TEST,
+        help='The number of samples to both compute closed form SVD on, and to train the neural network on. WARNING: '
+             'The specified number of samples must fit into dedicated GPU memory. There are (4097,) 32 bit floats '
+             'per-sample, and %d samples by default.' % DEFAULT_NUM_SAMPLES_FOR_TEST
+    )
     parser.add_argument('--num-samples-train-set', type=int, action='store', dest='num_samples_train_set', required=False, default=None)
     parser.add_argument('--num-samples-val-set', type=int, action='store', dest='num_samples_val_set', required=False, default=None)
     parser.add_argument('--num-samples-test-set', type=int, action='store', dest='num_samples_test_set', required=False, default=None)
-    # parser.add_argument('--desired-num-samples', type=int, action='store', dest='desired_num_samples', required=False, default=100000)
+    parser.add_argument(
+        '--num-freq-bins', type=int, action='store', dest='num_freq_bins', default=4097, required=False,
+        help='The number of frequency bins for a single sample, by default this corresponds to: %d frequency bins per '
+             'spectrum.' % 4097
+    )
+    parser.add_argument(
+        '--num-units-latent-space', type=int, action='store', dest='num_units_latent_space', required=False, default=1,
+        help='The number of units/neurons to use in the 1D latent space to encode the source data. By default: %d' % 1
+    )
+    parser.add_argument('--num-epochs', type=int, action='store', dest='num_epochs', required=False, default=DEFAULT_NUM_EPOCHS, help='Number of epochs to train the model. An epoch is an iteration over the entire x and y data provided.')
+   # parser.add_argument('--desired-num-samples', type=int, action='store', dest='desired_num_samples', required=False, default=100000)
     command_line_args = parser.parse_args()
     main(args=command_line_args)
