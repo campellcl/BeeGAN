@@ -150,25 +150,30 @@ def main(args):
     print(autoencoder.summary())
 
     if is_debug:
-        # TODO: Enable any TensorBoard callbacks for debugging here.
-        pass
+        # See: https://www.tensorflow.org/guide/keras/train_and_evaluate#visualizing_loss_and_metrics_during_training &
+        # https://www.tensorflow.org/api_docs/python/tf/keras/callbacks/TensorBoard &
+        # https://www.tensorflow.org/tensorboard/get_started
+        tensorboard_output_dir = os.path.join(output_data_dir, 'TensorBoard')
+        if not os.path.exists(tensorboard_output_dir):
+            os.makedirs(tensorboard_output_dir)
+        tb_callback = tf.keras.callbacks.TensorBoard(
+            log_dir=tensorboard_output_dir,
+            histogram_freq=1,
+            embeddings_freq=0,
+            write_graph=True,
+            write_images=True,
+            update_freq="epoch",
+            profile_batch=0
+        )
+    else:
+        tb_callback = None
 
-    # train_tf_record_ds: tf.data.TFRecordDataset = train_tf_record_loader.get_batched_tf_record_dataset(
-    #     batch_size=train_batch_size,
-    #     prefetch=True,
-    #     cache=True
-    # )
-    # val_tf_record_ds: tf.data.TFRecordDataset = val_tf_record_loader.get_batched_tf_record_dataset(
-    #     batch_size=train_batch_size,
-    #     prefetch=True,
-    #     cache=True
-    # )
     autoencoder.fit(
         x_train,
         batch_size=train_batch_size,
         epochs=num_epochs,
         verbose=1,
-        callbacks=None,
+        callbacks=[tb_callback] if tb_callback is not None else None,
         validation_data=None,
         shuffle=False,
         class_weight=None,
