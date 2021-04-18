@@ -3,10 +3,7 @@ import os
 from typing import Tuple, Optional
 from Utils.EnumeratedTypes.DatasetSplitType import DatasetSplitType
 import tensorflow as tf
-import matplotlib.pyplot as plt
-import time
 import tensorflow_datasets as tfds
-import numpy as np
 
 
 class TFRecordLoader:
@@ -14,34 +11,47 @@ class TFRecordLoader:
     Loads and de-serializes TFRecord files and provides access to the deserialized TFRecord Dataset objects.
     """
 
-    def __init__(self, root_data_dir: str, dataset_split_type: DatasetSplitType, order_deterministically: bool,
-                 is_debug: bool):
+    def __init__(self, root_data_dir: str, is_debug: bool):
         """
         __init__: Initializer for objects of type TFRecordLoader.
         :param root_data_dir:
-        :param dataset_split_type:
-        :param order_deterministically: <bool> A boolean flag which indicates whether the outputs from the dataset are
-         to be produced in deterministic order during iteration (see:
-         https://www.tensorflow.org/api_docs/python/tf/data/Options). For optimal performance, enable this flag and
-         read multiple files at once while disregarding the order of the data. If you plan to shuffle the data anyway,
-         then it makes sense to consider reading non-deterministically.
-        :param is_debug:
+        :param is_debug: <bool> A boolean flag indicating if additional print statements should be displayed to console.
         """
         self._root_data_dir: str = root_data_dir
-        self._dataset_split_type: DatasetSplitType = dataset_split_type
-        self._order_deterministically: bool = order_deterministically
-        self.is_debug: bool = is_debug
-
-    def get_tf_record_dataset(self, prefetch: bool = True, cache: bool = False) -> tf.data.TFRecordDataset:
-        dataset: tf.data.TFRecordDataset
         # Ensure the root_data_dir is valid:
         if not os.path.isdir(self.root_data_dir):
             raise FileNotFoundError('The provided root data directory: \'%s\' is invalid!' % self.root_data_dir)
+        self.is_debug: bool = is_debug
+
+    def get_tf_record_dataset(self, dataset_split_type: DatasetSplitType, order_deterministically: bool,
+                              prefetch: bool = True, cache: bool = False) -> tf.data.TFRecordDataset:
+        """
+        get_tf_record_dataset: Convenience method which returns an instance of a TFRecordLoader object for the specified
+         dataset.
+        :param dataset_split_type: <DatasetSplitType> Either a TRAIN, VAL, or TEST enumerated type (from the
+         BeeGAN.Utils.EnumeratedTypes.DatasetSplitType module) representing the current split/partition of the dataset.
+        :param order_deterministically: <bool> A boolean flag which indicates whether the outputs from the dataset are
+         to be produced in deterministic order during iteration (see:
+         https://www.tensorflow.org/api_docs/python/tf/data/Options). For optimal performance, disable this flag and
+         read multiple files at once while disregarding the order of the data. If you plan to shuffle the data anyway,
+         then it makes sense to consider reading non-deterministically.
+        :param prefetch: <bool> A boolean flag indicating if prefetching should be enabled. Prefetching allows later
+         elements to be prepared while the current element is being processed. This often improves latency and
+         throughput, at the cost of using additional memory to store prefetched elements (see:
+         https://www.tensorflow.org/api_docs/python/tf/data/Dataset#prefetch).
+        :param cache: <bool> A boolean flag indicating if elements in the dataset should be cached to memory. WARNING:
+         Do not attempt to cache datasets that have a size larger than GPU memory, in memory; instead modify this method
+         to accept a filename to cache to, and take over clearing the cache on subsequent iterations (see:
+          https://www.tensorflow.org/api_docs/python/tf/data/Dataset#cache).
+        :return:
+        """
+        dataset: tf.data.TFRecordDataset
+
         # Get all TFRecord files belonging to the specified dataset split ('train', 'test', 'val', 'all'):
-        if self.dataset_split_type == DatasetSplitType.ALL:
+        if dataset_split_type == DatasetSplitType.ALL:
             file_pattern = os.path.join(self.root_data_dir, '*-*.tfrec')
         else:
-            file_pattern = os.path.join(self.root_data_dir, '{}-*.tfrec'.format(self.dataset_split_type.value))
+            file_pattern = os.path.join(self.root_data_dir, '{}-*.tfrec'.format(dataset_split_type.value))
         file_dataset = tf.data.Dataset.list_files(file_pattern=file_pattern)
 
         # This boolean flag indicates whether the outputs from the dataset need to be produced in deterministic order
@@ -49,7 +59,7 @@ class TFRecordLoader:
         # and read multiple files at once while disregarding the order of the data. If you plan to shuffle the data
         # anyway, then it makes sense to consider reading non-deterministically.
         tf_data_options = tf.data.Options()
-        tf_data_options.experimental_deterministic = self._order_deterministically
+        tf_data_options.experimental_deterministic = order_deterministically
         file_dataset = file_dataset.with_options(options=tf_data_options)
 
         # Read the raw binary TFRecord files into a dataset:
@@ -75,10 +85,20 @@ class TFRecordLoader:
                 pass
         return dataset
 
-    def get_batched_tf_record_dataset(self, batch_size: int, prefetch: bool = True, cache: bool = False) -> tf.data.TFRecordDataset:
+    def get_batched_tf_record_dataset(
+            self, dataset_split_type: DatasetSplitType, order_deterministically: bool, batch_size: int,
+            prefetch: bool = True, cache: bool = False) -> tf.data.TFRecordDataset:
         """
-        get_batched_tf_record_dataset: Retrieves the tf.data.TFRecordDataset object for the specified dataset split (e.g.
-         'train', 'test', 'val', 'all').
+        get_batched_tf_record_dataset: Retrieves the tf.data.TFRecordDataset object for the specified dataset split (
+         e.g. 'train', 'test', 'val', 'all').
+        WARNING: Improper use of this method will exhaust GPU memory resources and crash TensorFlow (see below).
+        :param dataset_split_type: <DatasetSplitType> Either a TRAIN, VAL, or TEST enumerated type (from the
+         BeeGAN.Utils.EnumeratedTypes.DatasetSplitType module) representing the current split/partition of the dataset.
+        :param order_deterministically: <bool> A boolean flag which indicates whether the outputs from the dataset are
+         to be produced in deterministic order during iteration (see:
+         https://www.tensorflow.org/api_docs/python/tf/data/Options). For optimal performance, disable this flag and
+         read multiple files at once while disregarding the order of the data. If you plan to shuffle the data anyway,
+         then it makes sense to consider reading non-deterministically.
         :param batch_size: <int> The batch size that the iterator of the dataset should yield in each step.
         :param prefetch: <bool> A boolean flag indicating if prefetching should be enabled. Prefetching allows later
          elements to be prepared while the current element is being processed. This often improves latency and
@@ -99,18 +119,18 @@ class TFRecordLoader:
         if not os.path.isdir(self.root_data_dir):
             raise FileNotFoundError('The provided root data directory: \'%s\' is invalid!' % self.root_data_dir)
         # Get all TFRecord files belonging to the specified dataset split ('train', 'test', 'val', 'all'):
-        if self.dataset_split_type == DatasetSplitType.ALL:
+        if dataset_split_type == DatasetSplitType.ALL:
             file_pattern = os.path.join(self.root_data_dir, '*-*.tfrec')
         else:
-            file_pattern = os.path.join(self.root_data_dir, '{}-*.tfrec'.format(self.dataset_split_type.value))
+            file_pattern = os.path.join(self.root_data_dir, '{}-*.tfrec'.format(dataset_split_type.value))
         file_dataset = tf.data.Dataset.list_files(file_pattern=file_pattern)
 
         # This boolean flag indicates whether the outputs from the dataset need to be produced in deterministic order
-        #   (see: https://www.tensorflow.org/api_docs/python/tf/data/Options). For optimal performance, enable this flag
-        # and read multiple files at once while disregarding the order of the data. If you plan to shuffle the data
+        #   (see: https://www.tensorflow.org/api_docs/python/tf/data/Options). For optimal performance, disable this
+        # flag and read multiple files at once while disregarding the order of the data. If you plan to shuffle the data
         # anyway, then it makes sense to consider reading non-deterministically.
         tf_data_options = tf.data.Options()
-        tf_data_options.experimental_deterministic = self._order_deterministically
+        tf_data_options.experimental_deterministic = order_deterministically
         file_dataset = file_dataset.with_options(options=tf_data_options)
 
         # Read the raw binary TFRecord files into a dataset:
@@ -125,15 +145,18 @@ class TFRecordLoader:
             num_parallel_calls=tf.data.AUTOTUNE
         )
         # Pre-split the Dataset into batches for training:
-        # NOTE: The dataset does not fit into memory so we cannot cache it using the native tf.Dataset method .cache():
         if cache:
             if prefetch:
-                dataset = dataset.batch(batch_size=batch_size, drop_remainder=True).cache().prefetch(buffer_size=tf.data.AUTOTUNE)
+                dataset = dataset.batch(batch_size=batch_size, drop_remainder=True).cache().prefetch(
+                    buffer_size=tf.data.AUTOTUNE
+                )
             else:
                 dataset = dataset.batch(batch_size=batch_size, drop_remainder=True).cache()
         else:
             if prefetch:
-                dataset = dataset.batch(batch_size=batch_size, drop_remainder=True).prefetch(buffer_size=tf.data.AUTOTUNE)
+                dataset = dataset.batch(batch_size=batch_size, drop_remainder=True).prefetch(
+                    buffer_size=tf.data.AUTOTUNE
+                )
             else:
                 dataset = dataset.batch(batch_size=batch_size, drop_remainder=True)
 
@@ -147,13 +170,48 @@ class TFRecordLoader:
         # spectrogram_tensor_batch = tf_example_batch[1]
         return dataset
 
-    @property
-    def order_deterministically(self) -> bool:
-        return self._order_deterministically
+    def get_dataset_subset_from_memory(self, dataset_split_type: DatasetSplitType, order_deterministically: bool,
+                                       num_samples: int, num_frequency_bins: int) -> tf.Tensor:
+        """
+        get_dataset_subset_from_memory: Loads the specified number of samples from the TFRecordDataset object (via the
+         disk) into memory.
+        WARNING: Improper usage of this method may exhaust system RAM and lock up the host machine. You must ensure that
+         the size of the dataset you have requested (in 32 bit float samples) will fit into memory.
+        :param dataset_split_type: <DatasetSplitType> Either a TRAIN, VAL, or TEST enumerated type (from the
+         BeeGAN.Utils.EnumeratedTypes.DatasetSplitType module) representing the current split/partition of the dataset.
+        :param order_deterministically: <bool>
+        :param num_samples:
+        :param num_frequency_bins: <int> The number of frequency bins (e.g. the length of a row in the specified
+         TFRecord dataset). Typically this value could be computed with data.shape[1], but with TFRecordDatasets the
+         cardinality is not implicitly known in advance, so here it must be supplied manually.
+        :return data: <tf.Tensor> A tensor containing the requested dataset subset in memory. The subset returned will
+         be size (num_samples x num_freq_bins).
+        """
+        data: tf.Tensor
 
-    @property
-    def dataset_split_type(self) -> DatasetSplitType:
-        return self._dataset_split_type
+        # Construct a placeholder tensor to store data in memory:
+        data: tf.Tensor = tf.zeros(
+            shape=(num_samples, num_frequency_bins),
+            dtype=tf.dtypes.float32,
+            name='x_%s_mem' % dataset_split_type.value
+        )
+
+        # Construct a batch iterator and retrieve the entire num_samples x num_freq in-memory-dataset at once:
+        tf_record_batch_ds = self.get_batched_tf_record_dataset(
+            dataset_split_type=dataset_split_type,
+            order_deterministically=order_deterministically,
+            batch_size=num_samples,
+            prefetch=True,
+            cache=False
+        )
+        # Now get the single batch from the dataset:
+        x_0, _ = next(iter(tf_record_batch_ds))
+        # Assign it to a tensor in memory:
+        data = tf.add(data, x_0, name='x_%s_mem' % dataset_split_type.value)
+
+        # Manually flag the tf.dataset for de-allocation from memory:
+        del tf_record_batch_ds
+        return data
 
     @property
     def root_data_dir(self) -> str:
@@ -179,8 +237,9 @@ class TFRecordLoader:
          to binary:
         '''
         feature_description = {
+            # 2D Tensors must be flattened and encoded as a ByteString, 1D tensors are encoded as a ByteString as well:
             'frequencies': tf.io.FixedLenFeature([], tf.string),
-            # The (originally 1D source Tensor) is now a serialized ByteString
+            # The (originally 1D source Tensor generated from str obj) is now a serialized ByteString:
             'iso_8601': tf.io.FixedLenFeature([], tf.string)
         }
 
@@ -225,6 +284,31 @@ class TFRecordLoader:
         tfds_benchmark = tfds.core.benchmark(ds=ds, num_iter=1, batch_size=batch_size)
         return tfds_benchmark
 
+    @staticmethod
+    def determine_num_samples_in_dataset(dataset: tf.data.Dataset, dataset_split_type: DatasetSplitType) -> int:
+        """
+        determine_num_samples_in_dataset: Manually computes the number of samples by iterating over all elements (or
+         batches of elements) in the provided TFRecordDataset.
+        :param dataset: <tf.data.TFRecordDataset> The dataset to determine the cardinality of.
+        :param dataset_split_type: <DatasetSplitType> Either a TRAIN, VAL, or TEST enumerated type (from the
+         BeeGAN.Utils.EnumeratedTypes.DatasetSplitType module) representing the current split/partition of the dataset.
+        :return num_samples: <int> The number of samples in the provided dataset.
+        """
+        num_samples: int = -1
+        assert dataset_split_type != DatasetSplitType.ALL, dataset_split_type
+
+        num_samples = dataset.cardinality().numpy()
+        if num_samples == tf.data.UNKNOWN_CARDINALITY:
+            num_samples: int = 0
+            for i, (x_0, _) in dataset.enumerate(start=0):
+                if len(x_0.shape) == 1:
+                    # The dataset is not batched and this is a single sample.
+                    num_samples += 1
+                else:
+                    # The dataset is batched and this is a batch of samples.
+                    num_samples += x_0.shape[0]
+        return num_samples
+
     # @staticmethod
     # def plot_batch_sizes(ds: tf.data.Dataset):
     #     # tf_example_batch = next(iter(ds))
@@ -238,28 +322,6 @@ class TFRecordLoader:
     #     # plt.bar(range(len(batch_sizes)), batch_sizes)
     #     # plt.xlabel('Batch number')
     #     # plt.ylabel('Batch size')
-
-    @staticmethod
-    def attempt_to_load_entire_dataset_into_memory(ds: tf.data.Dataset, batch_size: Optional[int]):
-        """
-
-        :param ds:
-        :param batch_size: <int/None> Only provide the batch size if the input tf.data.Dataset is already pre-batched
-         (e.g. has had .batch(...) called on it). Be sure to provide the same batch size that was used during the
-         initial batching.
-        :return:
-        """
-
-        # if batch_size is not None:
-        #     num_batches = 0
-        #     ds = ds.as_numpy_iterator()
-        #     for i, (x_0, x_1) in enumerate(ds):
-        #
-        #         num_batches += 1
-        # else:
-        ds = ds.batch(-1, drop_remainder=True)
-        in_mem: np.ndarray = np.ndarray(ds.as_numpy_iterator())
-        print('Dataset shape in memory: %s' % (in_mem.shape,))
 
 
 def main(args):
@@ -296,12 +358,14 @@ def main(args):
 
     tf_record_loader = TFRecordLoader(
         root_data_dir=root_data_dir,
-        dataset_split_type=dataset_split_type,
-        order_deterministically=order_deterministically,
         is_debug=is_debug
     )
     dataset = tf_record_loader.get_batched_tf_record_dataset(
-        batch_size=dataset_batch_size
+        dataset_split_type=dataset_split_type,
+        order_deterministically=order_deterministically,
+        batch_size=dataset_batch_size,
+        prefetch=False,
+        cache=False
     )
     # A single item from the dataset is now a batch of tensors (dataset_batch_size x 1):
     tf_example_batch = next(iter(dataset))
