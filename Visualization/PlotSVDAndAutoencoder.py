@@ -9,6 +9,11 @@ from scipy.signal import get_window
 import math
 
 
+def if_dir_does_not_exist_create_it(path):
+    if not os.path.isdir(path):
+        os.makedirs(path)
+
+
 def main(args):
     # Command line arguments:
     root_data_dir: str = args.root_data_dir[0]
@@ -63,16 +68,30 @@ def main(args):
     # Takes (n=window_length, d=sample spacing (inverse of sampling rate)):
     freq_bin_centers = rfftfreq(window_length, 1/original_sample_rate_in_hz)
 
+    # Compute common axis windows:
+    # all_values = np.concatenate((singular_vector, weights_encoder, weights_decoder), axis=0)
+    # min_y_axis = np.min(all_values, axis=0)
+    # max_y_axis = np.max(all_values, axis=0)
+
     plt.plot(freq_bin_centers, singular_vector, label='Singular Vector', color='tab:green')
     plt.title('Frequency Bins vs. Singular Vector (Closed Form SVD) [%s]' % dataset_split_type)
     plt.ylabel('Singular Vector')
     plt.xlabel('Frequency Bins')
+    axes = plt.gca()
+    # plt.ylim(min_y_axis, max_y_axis)
+
+    output_path = os.path.join(output_data_dir, 'Visualizations')
+    if_dir_does_not_exist_create_it(path=output_path)
+    file_name = os.path.join(output_path, 'SingularVectorClosedFormSVD.png')
+    plt.savefig(file_name)
     plt.show()
+
 
     plt.clf()
     plt.title('Frequency Bins vs. Trained Encoder\'s Weights (1 unit) [%s]' % dataset_split_type)
     plt.ylabel('Encoder Weights')
     plt.xlabel('Frequency Bins')
+    # plt.ylim(min_y_axis, max_y_axis)
     plt.plot(freq_bin_centers, weights_encoder, label='Encoder Weights', color='tab:red')
     plt.show()
 
@@ -105,14 +124,14 @@ def main(args):
     # plt.ylabel()
 
     plt.clf()
-    plt.title('Frequency Bins vs. Encoding/SVD (Closed Form) [%s]' % dataset_split_type)
+    plt.title('Frequency Bins vs. Shared Weights/SVD (Closed Form) [%s]' % dataset_split_type)
     plt.ylabel('Encoder/Decoder Weights & Singular Vector')
     plt.xlabel('Frequency Bins')
-    plt.plot(freq_bin_centers, singular_vector, label='Singular Vector', alpha=1.0, color='tab:green')
-    plt.plot(freq_bin_centers, weights_encoder, label='Encoder Weights', alpha=0.5, color='tab:red')
-    plt.plot(freq_bin_centers, weights_decoder, label='Decoder Weights', alpha=0.5, color='tab:blue')
+    plt.plot(freq_bin_centers, singular_vector, label='Singular Vector', alpha=0.5, color='red')
+    plt.plot(freq_bin_centers, weights_encoder, label='Shared Encoder/Decoder Weights', alpha=0.5, color='blue')
+    # plt.plot(freq_bin_centers, weights_decoder, label='Decoder Weights', alpha=0.5, color='tab:blue')
     geometric_mean = np.sqrt(np.multiply(weights_encoder, weights_decoder))
-    plt.plot(freq_bin_centers, geometric_mean, label='Geometric Mean', alpha=0.5, color='tab:purple')
+    # plt.plot(freq_bin_centers, geometric_mean, label='Geometric Mean', alpha=0.5, color='tab:green')
     plt.legend()
     plt.show()
 
