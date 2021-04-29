@@ -6,6 +6,7 @@ from tensorflow.keras import layers, losses, activations, initializers, optimize
 from Utils.EnumeratedTypes.DatasetSplitType import DatasetSplitType
 from Utils.TensorFlow.TFRecordLoader import TFRecordLoader
 import numpy as np
+from tensorboard.plugins.hparams import api as hp
 
 DEFAULT_NUM_FREQ_BINS = 4097
 
@@ -61,9 +62,9 @@ class SVDDecoder(layers.Layer):
         return self.output_layer(latent_encoding)
 
 
-class SVDDecoderSharedWeights(layers.Layer):
+class SVDDecoderSharedWeightsLayer(layers.Layer):
     """
-    SVDDecoderSharedWeights: Emulates Singular Value Decomposition (SVD) with a shared weights between the encoder and
+    SVDDecoderSharedWeightsLayer: Emulates Singular Value Decomposition (SVD) with a shared weights between the encoder and
      decoder. The accompanying class `Decoder` provides an alternative SVD implementation to this class, with the
      encoder and decoder each having their own respective weights.
     """
@@ -91,7 +92,7 @@ class SVDAutoencoder(tf.keras.Model):
 
     def __init__(self, latent_dim: int, input_dim: int, share_weights: bool):
         """
-        __init__: Initializer for objects of type Autoencoder.
+        __init__: Initializer for objects of type SVDAutoencoder.
         :param latent_dim:
         :param input_dim:
         :param share_weights: <bool> A boolean flag indicating if the encoder and decoder should share the same weights
@@ -101,7 +102,9 @@ class SVDAutoencoder(tf.keras.Model):
         super(SVDAutoencoder, self).__init__()
         self.encoder = SVDEncoder(input_dim=input_dim, latent_dim=latent_dim)
         if share_weights:
-            self.decoder: SVDDecoderSharedWeights = SVDDecoderSharedWeights(encoding_layer=self.encoder, trainable=True)
+            self.decoder: SVDDecoderSharedWeightsLayer = SVDDecoderSharedWeightsLayer(
+                encoding_layer=self.encoder, trainable=True
+            )
         else:
             self.decoder: SVDDecoder = SVDDecoder(latent_dim=latent_dim, output_dim=input_dim, trainable=True)
 
@@ -198,6 +201,80 @@ class SVDAutoencoder(tf.keras.Model):
     # def metrics(self):
     #     # see: https://www.tensorflow.org/guide/keras/customizing_what_happens_in_fit/#going_lower-level
     #     return [self._loss_tracker]
+
+
+def create_sequential_svd_autoencoder_model(num_frequency_bins: int, num_units_latent_dim: int, share_weights: bool) \
+        -> tf.keras.Sequential:
+    """
+    create_sequential_model: Constructs a Sequential Keras model version of the existing SVDAutoencoder subclassed model.
+     This functionality is necessary because it appears that in order to use TensorFlow HParams we have to use a
+     sequential Keras model (e.g. https://www.tensorflow.org/guide/keras/sequential_model) and not a subclassed model
+     (e.g. https://www.tensorflow.org/guide/keras/custom_layers_and_models). This is just an assumption though, as I
+     can't seem to find any implementations with the subclassing approach. Additional supporting evidence includes
+     the fact that the Keras (non-TF) Scikit-Learn API itself explicitly specifies that it allows Sequential models
+     while omitting whether or not subclassed models are supported (see:
+     https://faroit.com/keras-docs/2.0.0/scikit-learn-api/) and the API documentation for the TensorFlow version of
+     the KerasClassifier is incredibly scarce (see:
+     https://www.tensorflow.org/api_docs/python/tf/keras/wrappers/scikit_learn/KerasClassifier). So in order to be
+     safe we implement a sequential version of our existing subclassed model for use with TensorFlow's HParams and
+     TensorFlow's tf.keras.wrappers.scikit_learn.KerasClassifier implementation of
+     keras.wrappers.scikit_learn.KerasClassifier.
+    :param num_frequency_bins: <int> The number of frequency bins in the source domain (by default this value is 4097
+     such that each sample is a frequency bin of shape 1 x 4097).
+    :param num_units_latent_dim: <int> The number of units in the 1D latent dimension to use for encoding.
+    :param share_weights: <bool> A boolean flag indicating if the weights should be shared between the encoder and
+     decoder. If True, the same weights variable will be used for both the auto-encoder and decoder. If False, the
+     encoder and decoder will both be trainable with their own respective weight variables.
+    :return sequential_svd_autoencoder: <tf.keras.Sequential> A Sequential (see:
+     https://www.tensorflow.org/guide/keras/sequential_model) Keras model representing the SVD emulating auto-encoder.
+     Be sure to remember to compile the model prior to use.
+    """
+    sequential_svd_autoencoder: tf.keras.Sequential
+
+    # Construct encoder layer:
+    encoding_layer = layers.Dense(
+        input_shape=(1, num_frequency_bins),
+        units=num_units_latent_dim,
+        activation=activations.linear,
+        use_bias=False,
+        kernel_initializer=initializers.RandomNormal(mean=0.0, stddev=0.05, seed=None),
+        bias_initializer=None,
+        kernel_regularizer=None,
+        bias_regularizer=None,
+        activity_regularizer=None,
+        bias_constraint=None,
+        name='encoder',
+        # Constrain each row of weights to unit norm:
+        kernel_constraint=tf.keras.constraints.unit_norm(axis=0),
+        trainable=False if share_weights else True
+    )
+    # Construct decoder layer:
+    if share_weights:
+        decoding_layer: SVDDecoderSharedWeightsLayer = SVDDecoderSharedWeightsLayer(
+            encoding_layer=encoding_layer,
+            trainable=True
+        )
+    else:
+        decoding_layer: tf.keras.layers.Layer = layers.Dense(
+            units=num_frequency_bins,
+            input_shape=(num_units_latent_dim,),
+            activation=activations.linear,
+            use_bias=False,
+            kernel_initializer=initializers.RandomNormal(mean=0.0, stddev=0.05, seed=None),
+            bias_initializer=None,
+            kernel_regularizer=None,
+            bias_regularizer=None,
+            activity_regularizer=None,
+            # kernel_constraint=tf.keras.constraints.unit_norm(axis=0),
+            bias_constraint=None,
+            name='decoder'
+        )
+    # Construct sequential Autoencoder:
+    sequential_svd_autoencoder: tf.keras.Sequential = tf.keras.Sequential([
+        encoding_layer,
+        decoding_layer
+    ])
+    return sequential_svd_autoencoder
 
 
 def main(args):
